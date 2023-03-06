@@ -24,7 +24,7 @@
 
 #if defined(NODE_WANT_INTERNALS) && NODE_WANT_INTERNALS
 
-#include "aliased_buffer.h"
+#include "aliased_buffer-inl.h"
 #include "callback_queue-inl.h"
 #include "env.h"
 #include "node.h"
@@ -67,6 +67,10 @@ inline NodeArrayBufferAllocator* IsolateData::node_allocator() const {
 
 inline MultiIsolatePlatform* IsolateData::platform() const {
   return platform_;
+}
+
+inline const SnapshotData* IsolateData::snapshot_data() const {
+  return snapshot_data_;
 }
 
 inline void IsolateData::set_worker_context(worker::Worker* context) {
@@ -197,48 +201,6 @@ inline Environment* Environment::GetCurrent(
   return GetCurrent(info.GetIsolate()->GetCurrentContext());
 }
 
-template <typename T, typename U>
-inline T* Environment::GetBindingData(const v8::PropertyCallbackInfo<U>& info) {
-  return GetBindingData<T>(info.GetIsolate()->GetCurrentContext());
-}
-
-template <typename T>
-inline T* Environment::GetBindingData(
-    const v8::FunctionCallbackInfo<v8::Value>& info) {
-  return GetBindingData<T>(info.GetIsolate()->GetCurrentContext());
-}
-
-template <typename T>
-inline T* Environment::GetBindingData(v8::Local<v8::Context> context) {
-  BindingDataStore* map = static_cast<BindingDataStore*>(
-      context->GetAlignedPointerFromEmbedderData(
-          ContextEmbedderIndex::kBindingListIndex));
-  DCHECK_NOT_NULL(map);
-  auto it = map->find(T::type_name);
-  if (UNLIKELY(it == map->end())) return nullptr;
-  T* result = static_cast<T*>(it->second.get());
-  DCHECK_NOT_NULL(result);
-  DCHECK_EQ(result->env(), GetCurrent(context));
-  return result;
-}
-
-template <typename T>
-inline T* Environment::AddBindingData(
-    v8::Local<v8::Context> context,
-    v8::Local<v8::Object> target) {
-  DCHECK_EQ(GetCurrent(context), this);
-  // This won't compile if T is not a BaseObject subclass.
-  BaseObjectPtr<T> item = MakeDetachedBaseObject<T>(this, target);
-  BindingDataStore* map = static_cast<BindingDataStore*>(
-      context->GetAlignedPointerFromEmbedderData(
-          ContextEmbedderIndex::kBindingListIndex));
-  DCHECK_NOT_NULL(map);
-  auto result = map->emplace(T::type_name, item);
-  CHECK(result.second);
-  DCHECK_EQ(GetBindingData<T>(context), item.get());
-  return item.get();
-}
-
 inline v8::Isolate* Environment::isolate() const {
   return isolate_;
 }
@@ -329,6 +291,10 @@ inline AliasedInt32Array& Environment::timeout_info() {
 
 inline TickInfo* Environment::tick_info() {
   return &tick_info_;
+}
+
+inline permission::Permission* Environment::permission() {
+  return &permission_;
 }
 
 inline uint64_t Environment::timer_base() const {
@@ -438,6 +404,14 @@ inline std::vector<double>* Environment::destroy_async_id_list() {
 
 inline builtins::BuiltinLoader* Environment::builtin_loader() {
   return &builtin_loader_;
+}
+
+inline const StartExecutionCallback& Environment::embedder_entry_point() const {
+  return embedder_entry_point_;
+}
+
+inline void Environment::set_embedder_entry_point(StartExecutionCallback&& fn) {
+  embedder_entry_point_ = std::move(fn);
 }
 
 inline double Environment::new_async_id() {

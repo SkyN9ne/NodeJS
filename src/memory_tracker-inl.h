@@ -4,6 +4,7 @@
 #if defined(NODE_WANT_INTERNALS) && NODE_WANT_INTERNALS
 
 #include "memory_tracker.h"
+#include "util-inl.h"
 
 namespace node {
 
@@ -269,13 +270,6 @@ void MemoryTracker::TrackInlineField(const char* name,
   TrackInlineFieldWithSize(name, sizeof(value), "uv_async_t");
 }
 
-template <class NativeT, class V8T>
-void MemoryTracker::TrackField(const char* name,
-                               const AliasedBufferBase<NativeT, V8T>& value,
-                               const char* node_name) {
-  TrackField(name, value.GetJSArray(), "AliasedBuffer");
-}
-
 void MemoryTracker::Track(const MemoryRetainer* retainer,
                           const char* edge_name) {
   v8::HandleScope handle_scope(isolate_);
@@ -318,8 +312,8 @@ MemoryRetainerNode* MemoryTracker::AddNode(const MemoryRetainer* retainer,
   if (CurrentNode() != nullptr) graph_->AddEdge(CurrentNode(), n, edge_name);
 
   if (n->JSWrapperNode() != nullptr) {
-    graph_->AddEdge(n, n->JSWrapperNode(), "wrapped");
-    graph_->AddEdge(n->JSWrapperNode(), n, "wrapper");
+    graph_->AddEdge(n, n->JSWrapperNode(), "native_to_javascript");
+    graph_->AddEdge(n->JSWrapperNode(), n, "javascript_to_native");
   }
 
   return n;

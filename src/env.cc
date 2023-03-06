@@ -472,19 +472,20 @@ IsolateData::IsolateData(Isolate* isolate,
                          uv_loop_t* event_loop,
                          MultiIsolatePlatform* platform,
                          ArrayBufferAllocator* node_allocator,
-                         const IsolateDataSerializeInfo* isolate_data_info)
+                         const SnapshotData* snapshot_data)
     : isolate_(isolate),
       event_loop_(event_loop),
       node_allocator_(node_allocator == nullptr ? nullptr
                                                 : node_allocator->GetImpl()),
-      platform_(platform) {
+      platform_(platform),
+      snapshot_data_(snapshot_data) {
   options_.reset(
       new PerIsolateOptions(*(per_process::cli_options->per_isolate)));
 
-  if (isolate_data_info == nullptr) {
+  if (snapshot_data == nullptr) {
     CreateProperties();
   } else {
-    DeserializeProperties(isolate_data_info);
+    DeserializeProperties(&snapshot_data->isolate_data_info);
   }
 }
 
@@ -544,7 +545,8 @@ void Environment::AssignToContext(Local<v8::Context> context,
   context->SetAlignedPointerInEmbedderData(ContextEmbedderIndex::kRealm, realm);
   // Used to retrieve bindings
   context->SetAlignedPointerInEmbedderData(
-      ContextEmbedderIndex::kBindingListIndex, &(this->bindings_));
+      ContextEmbedderIndex::kBindingDataStoreIndex,
+      realm->binding_data_store());
 
   // ContextifyContexts will update this to a pointer to the native object.
   context->SetAlignedPointerInEmbedderData(
@@ -669,20 +671,30 @@ Environment::Environment(IsolateData* isolate_data,
       stream_base_state_(isolate_,
                          StreamBase::kNumStreamBaseStateFields,
                          MAYBE_FIELD_PTR(env_info, stream_base_state)),
-      time_origin_(PERFORMANCE_NOW()),
-      time_origin_timestamp_(GetCurrentTimeInMicroseconds()),
+      time_origin_(performance::performance_process_start),
+      time_origin_timestamp_(performance::performance_process_start_timestamp),
+      environment_start_(PERFORMANCE_NOW()),
       flags_(flags),
       thread_id_(thread_id.id == static_cast<uint64_t>(-1)
                      ? AllocateEnvironmentThreadId().id
                      : thread_id.id) {
+  constexpr bool is_shared_ro_heap =
 #ifdef NODE_V8_SHARED_RO_HEAP
-  if (!is_main_thread()) {
+      true;
+#else
+      false;
+#endif
+  if (is_shared_ro_heap && !is_main_thread()) {
+    // If this is a Worker thread and we are in shared-readonly-heap mode,
+    // we can always safely use the parent's Isolate's code cache.
     CHECK_NOT_NULL(isolate_data->worker_context());
-    // TODO(addaleax): Adjust for the embedder API snapshot support changes
     builtin_loader()->CopySourceAndCodeCacheReferenceFrom(
         isolate_data->worker_context()->env()->builtin_loader());
+  } else if (isolate_data->snapshot_data() != nullptr) {
+    // ... otherwise, if a snapshot was provided, use its code cache.
+    builtin_loader()->RefreshCodeCache(
+        isolate_data->snapshot_data()->code_cache);
   }
-#endif
 
   // We'll be creating new objects so make sure we've entered the context.
   HandleScope handle_scope(isolate);
@@ -745,23 +757,31 @@ Environment::Environment(IsolateData* isolate_data,
                                       "args",
                                       std::move(traced_value));
   }
-}
 
-Environment::Environment(IsolateData* isolate_data,
-                         Local<Context> context,
-                         const std::vector<std::string>& args,
-                         const std::vector<std::string>& exec_args,
-                         const EnvSerializeInfo* env_info,
-                         EnvironmentFlags::Flags flags,
-                         ThreadId thread_id)
-    : Environment(isolate_data,
-                  context->GetIsolate(),
-                  args,
-                  exec_args,
-                  env_info,
-                  flags,
-                  thread_id) {
-  InitializeMainContext(context, env_info);
+  if (options_->experimental_permission) {
+    permission()->EnablePermissions();
+    // If any permission is set the process shouldn't be able to neither
+    // spawn/worker nor use addons unless explicitly allowed by the user
+    if (!options_->allow_fs_read.empty() || !options_->allow_fs_write.empty()) {
+      options_->allow_native_addons = false;
+      if (!options_->allow_child_process) {
+        permission()->Deny(permission::PermissionScope::kChildProcess, {});
+      }
+      if (!options_->allow_worker_threads) {
+        permission()->Deny(permission::PermissionScope::kWorkerThreads, {});
+      }
+    }
+
+    if (!options_->allow_fs_read.empty()) {
+      permission()->Apply(options_->allow_fs_read,
+                          permission::PermissionScope::kFileSystemRead);
+    }
+
+    if (!options_->allow_fs_write.empty()) {
+      permission()->Apply(options_->allow_fs_write,
+                          permission::PermissionScope::kFileSystemWrite);
+    }
+  }
 }
 
 void Environment::InitializeMainContext(Local<Context> context,
@@ -784,7 +804,7 @@ void Environment::InitializeMainContext(Local<Context> context,
   set_exiting(false);
 
   performance_state_->Mark(performance::NODE_PERFORMANCE_MILESTONE_ENVIRONMENT,
-                           time_origin_);
+                           environment_start_);
   performance_state_->Mark(performance::NODE_PERFORMANCE_MILESTONE_NODE_START,
                            per_process::node_start_time);
 
@@ -918,10 +938,11 @@ void Environment::InitializeLibuv() {
   StartProfilerIdleNotifier();
 }
 
-void Environment::ExitEnv() {
+void Environment::ExitEnv(StopFlags::Flags flags) {
   // Should not access non-thread-safe methods here.
   set_stopping(true);
-  isolate_->TerminateExecution();
+  if ((flags & StopFlags::kDoNotTerminateIsolate) == 0)
+    isolate_->TerminateExecution();
   SetImmediateThreadsafe([](Environment* env) {
     env->set_can_call_into_js(false);
     uv_stop(env->event_loop());
@@ -1025,7 +1046,6 @@ MaybeLocal<Value> Environment::RunSnapshotDeserializeMain() const {
 void Environment::RunCleanup() {
   started_cleanup_ = true;
   TRACE_EVENT0(TRACING_CATEGORY_NODE1(environment), "RunCleanup");
-  bindings_.clear();
   // Only BaseObject's cleanups are registered as per-realm cleanup hooks now.
   // Defer the BaseObject cleanup after handles are cleaned up.
   CleanupHandles();
@@ -1280,12 +1300,16 @@ void Environment::ToggleImmediateRef(bool ref) {
   }
 }
 
-
-Local<Value> Environment::GetNow() {
+uint64_t Environment::GetNowUint64() {
   uv_update_time(event_loop());
   uint64_t now = uv_now(event_loop());
   CHECK_GE(now, timer_base());
   now -= timer_base();
+  return now;
+}
+
+Local<Value> Environment::GetNow() {
+  uint64_t now = GetNowUint64();
   if (now <= 0xffffffff)
     return Integer::NewFromUnsigned(isolate(), static_cast<uint32_t>(now));
   else

@@ -39,6 +39,7 @@
 #include "node_realm-inl.h"
 #include "node_report.h"
 #include "node_revert.h"
+#include "node_sea.h"
 #include "node_snapshot_builder.h"
 #include "node_v8_platform-inl.h"
 #include "node_version.h"
@@ -122,6 +123,7 @@
 #include <cstring>
 
 #include <string>
+#include <tuple>
 #include <vector>
 
 namespace node {
@@ -275,15 +277,17 @@ MaybeLocal<Value> StartExecution(Environment* env, StartExecutionCallback cb) {
 
   if (cb != nullptr) {
     EscapableHandleScope scope(env->isolate());
+    // TODO(addaleax): pass the callback to the main script more directly,
+    // e.g. by making StartExecution(env, builtin) parametrizable
+    env->set_embedder_entry_point(std::move(cb));
+    auto reset_entry_point =
+        OnScopeLeave([&]() { env->set_embedder_entry_point({}); });
 
-    if (StartExecution(env, "internal/main/environment").IsEmpty()) return {};
+    const char* entry = env->isolate_data()->options()->build_snapshot
+                            ? "internal/main/mksnapshot"
+                            : "internal/main/embedding";
 
-    StartExecutionCallbackInfo info = {
-        env->process_object(),
-        env->builtin_module_require(),
-    };
-
-    return scope.EscapeMaybe(cb(info));
+    return scope.EscapeMaybe(StartExecution(env, entry));
   }
 
   // TODO(joyeecheung): move these conditions into JS land and let the
@@ -307,7 +311,7 @@ MaybeLocal<Value> StartExecution(Environment* env, StartExecutionCallback cb) {
     return StartExecution(env, "internal/main/inspect");
   }
 
-  if (per_process::cli_options->build_snapshot) {
+  if (env->isolate_data()->options()->build_snapshot) {
     return StartExecution(env, "internal/main/mksnapshot");
   }
 
@@ -1111,8 +1115,7 @@ ExitCode GenerateAndWriteSnapshotData(const SnapshotData** snapshot_data_ptr,
               "node:embedded_snapshot_main was specified as snapshot "
               "entry point but Node.js was built without embedded "
               "snapshot.\n");
-      // TODO(joyeecheung): should be kInvalidCommandLineArgument instead.
-      exit_code = ExitCode::kGenericUserError;
+      exit_code = ExitCode::kInvalidCommandLineArgument;
       return exit_code;
     }
   } else {
@@ -1139,14 +1142,13 @@ ExitCode GenerateAndWriteSnapshotData(const SnapshotData** snapshot_data_ptr,
 
   FILE* fp = fopen(snapshot_blob_path.c_str(), "wb");
   if (fp != nullptr) {
-    (*snapshot_data_ptr)->ToBlob(fp);
+    (*snapshot_data_ptr)->ToFile(fp);
     fclose(fp);
   } else {
     fprintf(stderr,
             "Cannot open %s for writing a snapshot.\n",
             snapshot_blob_path.c_str());
-    // TODO(joyeecheung): should be kStartupSnapshotFailure.
-    exit_code = ExitCode::kGenericUserError;
+    exit_code = ExitCode::kStartupSnapshotFailure;
   }
   return exit_code;
 }
@@ -1162,19 +1164,19 @@ ExitCode LoadSnapshotDataAndRun(const SnapshotData** snapshot_data_ptr,
     FILE* fp = fopen(filename.c_str(), "rb");
     if (fp == nullptr) {
       fprintf(stderr, "Cannot open %s", filename.c_str());
-      // TODO(joyeecheung): should be kStartupSnapshotFailure.
-      exit_code = ExitCode::kGenericUserError;
+      exit_code = ExitCode::kStartupSnapshotFailure;
       return exit_code;
     }
     std::unique_ptr<SnapshotData> read_data = std::make_unique<SnapshotData>();
-    if (!SnapshotData::FromBlob(read_data.get(), fp)) {
-      // If we fail to read the customized snapshot, simply exit with 1.
-      // TODO(joyeecheung): should be kStartupSnapshotFailure.
-      exit_code = ExitCode::kGenericUserError;
+    bool ok = SnapshotData::FromFile(read_data.get(), fp);
+    fclose(fp);
+    if (!ok) {
+      // If we fail to read the customized snapshot,
+      // simply exit with kStartupSnapshotFailure.
+      exit_code = ExitCode::kStartupSnapshotFailure;
       return exit_code;
     }
     *snapshot_data_ptr = read_data.release();
-    fclose(fp);
   } else if (per_process::cli_options->node_snapshot) {
     // If --snapshot-blob is not specified, we are reading the embedded
     // snapshot, but we will skip it if --no-node-snapshot is specified.
@@ -1227,7 +1229,7 @@ static ExitCode StartInternal(int argc, char** argv) {
   uv_loop_configure(uv_default_loop(), UV_METRICS_IDLE_TIME);
 
   // --build-snapshot indicates that we are in snapshot building mode.
-  if (per_process::cli_options->build_snapshot) {
+  if (per_process::cli_options->per_isolate->build_snapshot) {
     if (result->args().size() < 2) {
       fprintf(stderr,
               "--build-snapshot must be used with an entry point script.\n"
@@ -1242,11 +1244,14 @@ static ExitCode StartInternal(int argc, char** argv) {
 }
 
 int Start(int argc, char** argv) {
+#ifndef DISABLE_SINGLE_EXECUTABLE_APPLICATION
+  std::tie(argc, argv) = sea::FixupArgsForSEA(argc, argv);
+#endif
   return static_cast<int>(StartInternal(argc, argv));
 }
 
-int Stop(Environment* env) {
-  env->ExitEnv();
+int Stop(Environment* env, StopFlags::Flags flags) {
+  env->ExitEnv(flags);
   return 0;
 }
 

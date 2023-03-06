@@ -1385,6 +1385,10 @@ added:
   - v16.17.0
 changes:
   - version:
+    - REPLACEME
+    pr-url: https://github.com/nodejs/node/pull/46718
+    description: The API is no longer experimental.
+  - version:
     - v18.11.0
     - v16.19.0
     pr-url: https://github.com/nodejs/node/pull/44631
@@ -1396,8 +1400,6 @@ changes:
     description: add support for returning detailed parse information
                  using `tokens` in input `config` and returned properties.
 -->
-
-> Stability: 1 - Experimental
 
 * `config` {Object} Used to provide arguments for parsing and to configure
   the parser. `config` supports the following properties:
@@ -1476,9 +1478,6 @@ const {
 console.log(values, positionals);
 // Prints: [Object: null prototype] { foo: true, bar: 'b' } []
 ```
-
-`util.parseArgs` is experimental and behavior may change. Join the
-conversation in [pkgjs/parseargs][] to contribute to the design.
 
 ### `parseArgs` `tokens`
 
@@ -1987,6 +1986,51 @@ Marks the given {AbortSignal} as transferable so that it can be used with
 const signal = transferableAbortSignal(AbortSignal.timeout(100));
 const channel = new MessageChannel();
 channel.port2.postMessage(signal, [signal]);
+```
+
+## `util.aborted(signal, resource)`
+
+<!-- YAML
+added: v19.7.0
+-->
+
+> Stability: 1 - Experimental
+
+* `signal` {AbortSignal}
+* `resource` {Object} Any non-null entity, reference to which is held weakly.
+* Returns: {Promise}
+
+Listens to abort event on the provided `signal` and
+returns a promise that is fulfilled when the `signal` is
+aborted. If the passed `resource` is garbage collected before the `signal` is
+aborted, the returned promise shall remain pending indefinitely.
+
+```cjs
+const { aborted } = require('node:util');
+
+const dependent = obtainSomethingAbortable();
+
+aborted(dependent.signal, dependent).then(() => {
+  // Do something when dependent is aborted.
+});
+
+dependent.on('event', () => {
+  dependent.abort();
+});
+```
+
+```mjs
+import { aborted } from 'node:util';
+
+const dependent = obtainSomethingAbortable();
+
+aborted(dependent.signal, dependent).then(() => {
+  // Do something when dependent is aborted.
+});
+
+dependent.on('event', () => {
+  dependent.abort();
+});
 ```
 
 ## `util.types`
@@ -3296,6 +3340,5 @@ util.log('Timestamped message.');
 [default sort]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/sort
 [global symbol registry]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Symbol/for
 [list of deprecated APIS]: deprecations.md#list-of-deprecated-apis
-[pkgjs/parseargs]: https://github.com/pkgjs/parseargs
 [semantically incompatible]: https://github.com/nodejs/node/issues/4179
 [util.inspect.custom]: #utilinspectcustom

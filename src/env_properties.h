@@ -20,11 +20,13 @@
 #define PER_ISOLATE_PRIVATE_SYMBOL_PROPERTIES(V)                               \
   V(arrow_message_private_symbol, "node:arrowMessage")                         \
   V(contextify_context_private_symbol, "node:contextify:context")              \
+  V(compiled_function_entry, "node:compiled_function_entry")                   \
   V(decorated_private_symbol, "node:decorated")                                \
   V(napi_type_tag, "node:napi:type_tag")                                       \
   V(napi_wrapper, "node:napi:wrapper")                                         \
   V(untransferable_object_private_symbol, "node:untransferableObject")         \
-  V(exit_info_private_symbol, "node:exit_info_private_symbol")
+  V(exit_info_private_symbol, "node:exit_info_private_symbol")                 \
+  V(require_private_symbol, "node:require_private_symbol")
 
 // Symbols are per-isolate primitives but Environment proxies them
 // for the sake of convenience.
@@ -231,6 +233,7 @@
   V(password_string, "password")                                               \
   V(path_string, "path")                                                       \
   V(pending_handle_string, "pendingHandle")                                    \
+  V(permission_string, "permission")                                           \
   V(pid_string, "pid")                                                         \
   V(ping_rtt_string, "pingRTT")                                                \
   V(pipe_source_string, "pipeSource")                                          \
@@ -258,6 +261,7 @@
   V(rename_string, "rename")                                                   \
   V(replacement_string, "replacement")                                         \
   V(require_string, "require")                                                 \
+  V(resource_string, "resource")                                               \
   V(retry_string, "retry")                                                     \
   V(salt_length_string, "saltLength")                                          \
   V(scheme_string, "scheme")                                                   \
@@ -328,15 +332,18 @@
   V(base_object_ctor_template, v8::FunctionTemplate)                           \
   V(binding_data_ctor_template, v8::FunctionTemplate)                          \
   V(blob_constructor_template, v8::FunctionTemplate)                           \
+  V(blob_reader_constructor_template, v8::FunctionTemplate)                    \
   V(blocklist_constructor_template, v8::FunctionTemplate)                      \
   V(contextify_global_template, v8::ObjectTemplate)                            \
   V(contextify_wrapper_template, v8::ObjectTemplate)                           \
   V(compiled_fn_entry_template, v8::ObjectTemplate)                            \
+  V(crypto_key_object_handle_constructor, v8::FunctionTemplate)                \
   V(env_proxy_template, v8::ObjectTemplate)                                    \
   V(env_proxy_ctor_template, v8::FunctionTemplate)                             \
   V(dir_instance_template, v8::ObjectTemplate)                                 \
   V(fd_constructor_template, v8::ObjectTemplate)                               \
   V(fdclose_constructor_template, v8::ObjectTemplate)                          \
+  V(fdentry_constructor_template, v8::FunctionTemplate)                        \
   V(filehandlereadwrap_template, v8::ObjectTemplate)                           \
   V(fsreqpromise_constructor_template, v8::ObjectTemplate)                     \
   V(handle_wrap_ctor_template, v8::FunctionTemplate)                           \
@@ -356,7 +363,10 @@
   V(secure_context_constructor_template, v8::FunctionTemplate)                 \
   V(shutdown_wrap_template, v8::ObjectTemplate)                                \
   V(socketaddress_constructor_template, v8::FunctionTemplate)                  \
+  V(streambaseentry_ctor_template, v8::FunctionTemplate)                       \
   V(streambaseoutputstream_constructor_template, v8::ObjectTemplate)           \
+  V(streamentry_ctor_template, v8::FunctionTemplate)                           \
+  V(streamentry_opaque_ctor_template, v8::FunctionTemplate)                    \
   V(qlogoutputstream_constructor_template, v8::ObjectTemplate)                 \
   V(tcp_constructor_template, v8::FunctionTemplate)                            \
   V(tty_constructor_template, v8::FunctionTemplate)                            \
@@ -374,7 +384,6 @@
   V(async_hooks_promise_resolve_function, v8::Function)                        \
   V(buffer_prototype_object, v8::Object)                                       \
   V(crypto_key_object_constructor, v8::Function)                               \
-  V(crypto_key_object_handle_constructor, v8::Function)                        \
   V(crypto_key_object_private_constructor, v8::Function)                       \
   V(crypto_key_object_public_constructor, v8::Function)                        \
   V(crypto_key_object_secret_constructor, v8::Function)                        \

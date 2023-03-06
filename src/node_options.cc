@@ -5,6 +5,7 @@
 #include "node_binding.h"
 #include "node_external_reference.h"
 #include "node_internals.h"
+#include "node_sea.h"
 #if HAVE_OPENSSL
 #include "openssl/opensslv.h"
 #endif
@@ -300,6 +301,10 @@ void Parse(
 // TODO(addaleax): Make that unnecessary.
 
 DebugOptionsParser::DebugOptionsParser() {
+#ifndef DISABLE_SINGLE_EXECUTABLE_APPLICATION
+  if (sea::IsSingleExecutable()) return;
+#endif
+
   AddOption("--inspect-port",
             "set host:port for inspector",
             &DebugOptions::host_port,
@@ -396,6 +401,11 @@ EnvironmentOptionsParser::EnvironmentOptionsParser() {
             "experimental ES Module import.meta.resolve() support",
             &EnvironmentOptions::experimental_import_meta_resolve,
             kAllowedInEnvvar);
+  AddOption("--experimental-permission",
+            "enable the permission system",
+            &EnvironmentOptions::experimental_permission,
+            kAllowedInEnvvar,
+            false);
   AddOption("--experimental-policy",
             "use the specified file as a "
             "security policy",
@@ -410,6 +420,22 @@ EnvironmentOptionsParser::EnvironmentOptionsParser() {
             &EnvironmentOptions::experimental_policy_integrity,
             kAllowedInEnvvar);
   Implies("--policy-integrity", "[has_policy_integrity_string]");
+  AddOption("--allow-fs-read",
+            "allow permissions to read the filesystem",
+            &EnvironmentOptions::allow_fs_read,
+            kAllowedInEnvvar);
+  AddOption("--allow-fs-write",
+            "allow permissions to write in the filesystem",
+            &EnvironmentOptions::allow_fs_write,
+            kAllowedInEnvvar);
+  AddOption("--allow-child-process",
+            "allow use of child process when any permissions are set",
+            &EnvironmentOptions::allow_child_process,
+            kAllowedInEnvvar);
+  AddOption("--allow-worker",
+            "allow worker threads when any permissions are set",
+            &EnvironmentOptions::allow_worker_threads,
+            kAllowedInEnvvar);
   AddOption("--experimental-repl-await",
             "experimental await keyword support in REPL",
             &EnvironmentOptions::experimental_repl_await,
@@ -777,6 +803,10 @@ PerIsolateOptionsParser::PerIsolateOptionsParser(
   Implies("--experimental-shadow-realm", "--harmony-shadow-realm");
   Implies("--harmony-shadow-realm", "--experimental-shadow-realm");
   ImpliesNot("--no-harmony-shadow-realm", "--experimental-shadow-realm");
+  AddOption("--build-snapshot",
+            "Generate a snapshot blob when the process exits.",
+            &PerIsolateOptions::build_snapshot,
+            kDisallowedInEnvvar);
 
   Insert(eop, &PerIsolateOptions::get_per_env_options);
 }
@@ -815,11 +845,6 @@ PerProcessOptionsParser::PerProcessOptionsParser(
             "disable Object.prototype.__proto__",
             &PerProcessOptions::disable_proto,
             kAllowedInEnvvar);
-  AddOption("--build-snapshot",
-            "Generate a snapshot blob when the process exits."
-            " Currently only supported in the node_mksnapshot binary.",
-            &PerProcessOptions::build_snapshot,
-            kDisallowedInEnvvar);
   AddOption("--node-snapshot",
             "",  // It's a debug-only option.
             &PerProcessOptions::node_snapshot,

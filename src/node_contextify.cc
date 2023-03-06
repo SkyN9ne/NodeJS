@@ -77,7 +77,6 @@ using v8::Uint32;
 using v8::UnboundScript;
 using v8::Value;
 using v8::WeakCallbackInfo;
-using v8::WeakCallbackType;
 
 // The vm module executes code in a sandboxed environment with a different
 // global object than the rest of the code. This is achieved by applying
@@ -117,9 +116,7 @@ BaseObjectPtr<ContextifyContext> ContextifyContext::New(
   InitializeGlobalTemplates(env->isolate_data());
   Local<ObjectTemplate> object_template = env->contextify_global_template();
   DCHECK(!object_template.IsEmpty());
-  bool use_node_snapshot = per_process::cli_options->node_snapshot;
-  const SnapshotData* snapshot_data =
-      use_node_snapshot ? SnapshotBuilder::GetEmbeddedSnapshotData() : nullptr;
+  const SnapshotData* snapshot_data = env->isolate_data()->snapshot_data();
 
   MicrotaskQueue* queue =
       options.microtask_queue_wrap
@@ -249,7 +246,7 @@ BaseObjectPtr<ContextifyContext> ContextifyContext::New(
     const ContextOptions& options) {
   HandleScope scope(env->isolate());
   // This only initializes part of the context. The primordials are
-  // only initilaized when needed because even deserializing them slows
+  // only initialized when needed because even deserializing them slows
   // things down significantly and they are only needed in rare occasions
   // in the vm contexts.
   if (InitializeContextRuntime(v8_context).IsNothing()) {
@@ -530,7 +527,9 @@ void ContextifyContext::PropertySetterCallback(
     return;
 
   USE(ctx->sandbox()->Set(context, property, value));
-  args.GetReturnValue().Set(value);
+  if (is_contextual_store || is_function) {
+    args.GetReturnValue().Set(value);
+  }
 }
 
 // static
@@ -1263,8 +1262,7 @@ void ContextifyContext::CompileFunction(
            context).ToLocal(&cache_key)) {
     return;
   }
-  CompiledFnEntry* entry = new CompiledFnEntry(env, cache_key, id, fn);
-  env->id_to_function_map.emplace(id, entry);
+  new CompiledFnEntry(env, cache_key, id, fn);
 
   Local<Object> result = Object::New(isolate);
   if (result->Set(parsing_context, env->function_string(), fn).IsNothing())
@@ -1296,23 +1294,18 @@ void ContextifyContext::CompileFunction(
   args.GetReturnValue().Set(result);
 }
 
-void CompiledFnEntry::WeakCallback(
-    const WeakCallbackInfo<CompiledFnEntry>& data) {
-  CompiledFnEntry* entry = data.GetParameter();
-  delete entry;
-}
-
 CompiledFnEntry::CompiledFnEntry(Environment* env,
                                  Local<Object> object,
                                  uint32_t id,
                                  Local<Function> fn)
-    : BaseObject(env, object), id_(id), fn_(env->isolate(), fn) {
-  fn_.SetWeak(this, WeakCallback, v8::WeakCallbackType::kParameter);
+    : BaseObject(env, object), id_(id) {
+  MakeWeak();
+  fn->SetPrivate(env->context(), env->compiled_function_entry(), object);
+  env->id_to_function_map.emplace(id, this);
 }
 
 CompiledFnEntry::~CompiledFnEntry() {
   env()->id_to_function_map.erase(id_);
-  fn_.ClearWeak();
 }
 
 static void StartSigintWatchdog(const FunctionCallbackInfo<Value>& args) {

@@ -43,6 +43,7 @@
 #include "node_perf_common.h"
 #include "node_realm.h"
 #include "node_snapshotable.h"
+#include "permission/permission.h"
 #include "req_wrap.h"
 #include "util.h"
 #include "uv.h"
@@ -126,7 +127,7 @@ class NODE_EXTERN_PRIVATE IsolateData : public MemoryRetainer {
               uv_loop_t* event_loop,
               MultiIsolatePlatform* platform = nullptr,
               ArrayBufferAllocator* node_allocator = nullptr,
-              const IsolateDataSerializeInfo* isolate_data_info = nullptr);
+              const SnapshotData* snapshot_data = nullptr);
   SET_MEMORY_INFO_NAME(IsolateData)
   SET_SELF_SIZE(IsolateData)
   void MemoryInfo(MemoryTracker* tracker) const override;
@@ -134,6 +135,7 @@ class NODE_EXTERN_PRIVATE IsolateData : public MemoryRetainer {
 
   inline uv_loop_t* event_loop() const;
   inline MultiIsolatePlatform* platform() const;
+  inline const SnapshotData* snapshot_data() const;
   inline std::shared_ptr<PerIsolateOptions> options();
   inline void set_options(std::shared_ptr<PerIsolateOptions> options);
 
@@ -205,6 +207,7 @@ class NODE_EXTERN_PRIVATE IsolateData : public MemoryRetainer {
   uv_loop_t* const event_loop_;
   NodeArrayBufferAllocator* const node_allocator_;
   MultiIsolatePlatform* platform_;
+  const SnapshotData* snapshot_data_;
   std::shared_ptr<PerIsolateOptions> options_;
   worker::Worker* worker_context_ = nullptr;
 };
@@ -515,11 +518,16 @@ struct SnapshotData {
   // v8::ScriptCompiler::CachedData is not copyable.
   std::vector<builtins::CodeCacheInfo> code_cache;
 
-  void ToBlob(FILE* out) const;
+  void ToFile(FILE* out) const;
+  std::vector<char> ToBlob() const;
   // If returns false, the metadata doesn't match the current Node.js binary,
   // and the caller should not consume the snapshot data.
   bool Check() const;
-  static bool FromBlob(SnapshotData* out, FILE* in);
+  static bool FromFile(SnapshotData* out, FILE* in);
+  static bool FromBlob(SnapshotData* out, const std::vector<char>& in);
+  static const SnapshotData* FromEmbedderWrapper(
+      const EmbedderSnapshotData* data);
+  EmbedderSnapshotData::Pointer AsEmbedderWrapper() const;
 
   ~SnapshotData();
 };
@@ -580,25 +588,6 @@ class Environment : public MemoryRetainer {
   static inline Environment* GetCurrent(
       const v8::PropertyCallbackInfo<T>& info);
 
-  // Methods created using SetMethod(), SetPrototypeMethod(), etc. inside
-  // this scope can access the created T* object using
-  // GetBindingData<T>(args) later.
-  template <typename T>
-  T* AddBindingData(v8::Local<v8::Context> context,
-                    v8::Local<v8::Object> target);
-  template <typename T, typename U>
-  static inline T* GetBindingData(const v8::PropertyCallbackInfo<U>& info);
-  template <typename T>
-  static inline T* GetBindingData(
-      const v8::FunctionCallbackInfo<v8::Value>& info);
-  template <typename T>
-  static inline T* GetBindingData(v8::Local<v8::Context> context);
-
-  typedef std::unordered_map<
-      FastStringKey,
-      BaseObjectPtr<BaseObject>,
-      FastStringKey::Hash> BindingDataStore;
-
   // Create an Environment without initializing a main Context. Use
   // InitializeMainContext() to initialize a main context for it.
   Environment(IsolateData* isolate_data,
@@ -610,14 +599,6 @@ class Environment : public MemoryRetainer {
               ThreadId thread_id);
   void InitializeMainContext(v8::Local<v8::Context> context,
                              const EnvSerializeInfo* env_info);
-  // Create an Environment and initialize the provided principal context for it.
-  Environment(IsolateData* isolate_data,
-              v8::Local<v8::Context> context,
-              const std::vector<std::string>& args,
-              const std::vector<std::string>& exec_args,
-              const EnvSerializeInfo* env_info,
-              EnvironmentFlags::Flags flags,
-              ThreadId thread_id);
   ~Environment() override;
 
   void InitializeLibuv();
@@ -637,7 +618,7 @@ class Environment : public MemoryRetainer {
   void RegisterHandleCleanups();
   void CleanupHandles();
   void Exit(ExitCode code);
-  void ExitEnv();
+  void ExitEnv(StopFlags::Flags flags);
 
   // Register clean-up cb to be called on environment destruction.
   inline void RegisterHandleCleanup(uv_handle_t* handle,
@@ -680,6 +661,7 @@ class Environment : public MemoryRetainer {
   inline AliasedInt32Array& timeout_info();
   inline TickInfo* tick_info();
   inline uint64_t timer_base() const;
+  inline permission::Permission* permission();
   inline std::shared_ptr<KVStore> env_vars();
   inline void set_env_vars(std::shared_ptr<KVStore> env_vars);
 
@@ -864,9 +846,11 @@ class Environment : public MemoryRetainer {
   inline HandleWrapQueue* handle_wrap_queue() { return &handle_wrap_queue_; }
   inline ReqWrapQueue* req_wrap_queue() { return &req_wrap_queue_; }
 
+  // https://w3c.github.io/hr-time/#dfn-time-origin
   inline uint64_t time_origin() {
     return time_origin_;
   }
+  // https://w3c.github.io/hr-time/#dfn-get-time-origin-timestamp
   inline double time_origin_timestamp() {
     return time_origin_timestamp_;
   }
@@ -909,6 +893,8 @@ class Environment : public MemoryRetainer {
   static inline Environment* ForAsyncHooks(AsyncHooks* hooks);
 
   v8::Local<v8::Value> GetNow();
+  uint64_t GetNowUint64();
+
   void ScheduleTimer(int64_t duration);
   void ToggleTimerRef(bool ref);
 
@@ -964,6 +950,9 @@ class Environment : public MemoryRetainer {
 
 #endif  // HAVE_INSPECTOR
 
+  inline const StartExecutionCallback& embedder_entry_point() const;
+  inline void set_embedder_entry_point(StartExecutionCallback&& fn);
+
   inline void set_process_exit_handler(
       std::function<void(Environment*, ExitCode)>&& handler);
 
@@ -1013,6 +1002,7 @@ class Environment : public MemoryRetainer {
   ImmediateInfo immediate_info_;
   AliasedInt32Array timeout_info_;
   TickInfo tick_info_;
+  permission::Permission permission_;
   const uint64_t timer_base_;
   std::shared_ptr<KVStore> env_vars_;
   bool printed_error_ = false;
@@ -1069,10 +1059,17 @@ class Environment : public MemoryRetainer {
 
   AliasedInt32Array stream_base_state_;
 
-  // https://w3c.github.io/hr-time/#dfn-time-origin
-  uint64_t time_origin_;
-  // https://w3c.github.io/hr-time/#dfn-get-time-origin-timestamp
-  double time_origin_timestamp_;
+  // As PerformanceNodeTiming is exposed in worker_threads, the per_process
+  // time origin is exposed in the worker threads. This is an intentional
+  // diverge from the HTML spec of web workers.
+  // Process start time from the monotonic clock. This should not be used as an
+  // absolute time, but only as a time relative to another monotonic clock time.
+  const uint64_t time_origin_;
+  // Process start timestamp from the wall clock. This is an absolute time
+  // exposed as `performance.timeOrigin`.
+  const double time_origin_timestamp_;
+  // This is the time when the environment is created.
+  const uint64_t environment_start_;
   std::unique_ptr<performance::PerformanceState> performance_state_;
 
   bool has_serialized_options_ = false;
@@ -1132,8 +1129,6 @@ class Environment : public MemoryRetainer {
   void RequestInterruptFromV8();
   static void CheckImmediate(uv_check_t* handle);
 
-  BindingDataStore bindings_;
-
   CleanupQueue cleanup_queue_;
   bool started_cleanup_ = false;
 
@@ -1147,6 +1142,7 @@ class Environment : public MemoryRetainer {
   std::unique_ptr<Realm> principal_realm_ = nullptr;
 
   builtins::BuiltinLoader builtin_loader_;
+  StartExecutionCallback embedder_entry_point_;
 
   // Used by allocate_managed_buffer() and release_managed_buffer() to keep
   // track of the BackingStore for a given pointer.

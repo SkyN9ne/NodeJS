@@ -61,7 +61,7 @@
       [ 'node_shared=="true"', {
         'node_target_type%': 'shared_library',
         'conditions': [
-          ['OS=="aix"', {
+          ['OS in "aix os400"', {
             # For AIX, always generate static library first,
             # It needs an extra step to generate exp and
             # then use both static lib and exp to create
@@ -110,7 +110,7 @@
     },
 
     'conditions': [
-      ['OS=="aix"', {
+      ['OS in "aix os400"', {
         'ldflags': [
           '-Wl,-bnoerrmsg',
         ],
@@ -151,7 +151,8 @@
 
       'include_dirs': [
         'src',
-        'deps/v8/include'
+        'deps/v8/include',
+        'deps/postject'
       ],
 
       'sources': [
@@ -191,7 +192,7 @@
           },
         }],
         [ 'node_intermediate_lib_type=="static_library" and '
-            'node_shared=="true" and OS=="aix"', {
+            'node_shared=="true" and OS in "aix os400"', {
           # For AIX, shared lib is linked by static lib and .exp. In the
           # case here, the executable needs to link to shared lib.
           # Therefore, use 'node_aix_shared' target to generate the
@@ -226,7 +227,7 @@
             },
           },
           'conditions': [
-            ['OS != "aix" and OS != "mac" and OS != "ios"', {
+            ['OS != "aix" and OS != "os400" and OS != "mac" and OS != "ios"', {
               'ldflags': [
                 '-Wl,--whole-archive',
                 '<(obj_dir)/<(STATIC_LIB_PREFIX)<(node_core_target_name)<(STATIC_LIB_SUFFIX)',
@@ -449,6 +450,7 @@
 
       'include_dirs': [
         'src',
+        'deps/postject',
         '<(SHARED_INTERMEDIATE_DIR)' # for node_natives.h
       ],
       'dependencies': [
@@ -457,6 +459,7 @@
         'deps/histogram/histogram.gyp:histogram',
         'deps/uvwasi/uvwasi.gyp:uvwasi',
         'deps/simdutf/simdutf.gyp:simdutf',
+        'deps/ada/ada.gyp:ada',
       ],
 
       'sources': [
@@ -474,6 +477,7 @@
         'src/cleanup_queue.cc',
         'src/connect_wrap.cc',
         'src/connection_wrap.cc',
+        'src/dataqueue/queue.cc',
         'src/debug_utils.cc',
         'src/env.cc',
         'src/fs_event_wrap.cc',
@@ -522,6 +526,7 @@
         'src/node_report.cc',
         'src/node_report_module.cc',
         'src/node_report_utils.cc',
+        'src/node_sea.cc',
         'src/node_serdes.cc',
         'src/node_shadow_realm.cc',
         'src/node_snapshotable.cc',
@@ -532,7 +537,6 @@
         'src/node_trace_events.cc',
         'src/node_types.cc',
         'src/node_url.cc',
-        'src/node_url_tables.cc',
         'src/node_util.cc',
         'src/node_v8.cc',
         'src/node_wasi.cc',
@@ -540,6 +544,10 @@
         'src/node_watchdog.cc',
         'src/node_worker.cc',
         'src/node_zlib.cc',
+        'src/permission/child_process_permission.cc',
+        'src/permission/fs_permission.cc',
+        'src/permission/permission.cc',
+        'src/permission/worker_permission.cc',
         'src/pipe_wrap.cc',
         'src/process_wrap.cc',
         'src/signal_wrap.cc',
@@ -563,12 +571,14 @@
         'src/uv.cc',
         # headers to make for a more pleasant IDE experience
         'src/aliased_buffer.h',
+        'src/aliased_buffer-inl.h',
         'src/aliased_struct.h',
         'src/aliased_struct-inl.h',
         'src/async_wrap.h',
         'src/async_wrap-inl.h',
         'src/base_object.h',
         'src/base_object-inl.h',
+        'src/base_object_types.h',
         'src/base64.h',
         'src/base64-inl.h',
         'src/callback_queue.h',
@@ -577,6 +587,7 @@
         'src/cleanup_queue-inl.h',
         'src/connect_wrap.h',
         'src/connection_wrap.h',
+        'src/dataqueue/queue.h',
         'src/debug_utils.h',
         'src/debug_utils-inl.h',
         'src/env_properties.h',
@@ -633,6 +644,7 @@
         'src/node_report.h',
         'src/node_revert.h',
         'src/node_root_certs.h',
+        'src/node_sea.h',
         'src/node_shadow_realm.h',
         'src/node_snapshotable.h',
         'src/node_snapshot_builder.h',
@@ -648,6 +660,11 @@
         'src/node_wasi.h',
         'src/node_watchdog.h',
         'src/node_worker.h',
+        'src/permission/child_process_permission.h',
+        'src/permission/fs_permission.h',
+        'src/permission/permission.h',
+        'src/permission/permission_node.h',
+        'src/permission/worker_permission.h',
         'src/pipe_wrap.h',
         'src/req_wrap.h',
         'src/req_wrap-inl.h',
@@ -661,6 +678,7 @@
         'src/string_decoder-inl.h',
         'src/string_search.h',
         'src/tcp_wrap.h',
+        'src/timers.h',
         'src/tracing/agent.h',
         'src/tracing/node_trace_buffer.h',
         'src/tracing/node_trace_writer.h',
@@ -675,6 +693,7 @@
         'src/util-inl.h',
         # Dependency headers
         'deps/v8/include/v8.h',
+        'deps/postject/postject-api.h',
         # javascript files to make for an even more pleasant IDE experience
         '<@(library_files)',
         '<@(deps_files)',
@@ -734,7 +753,7 @@
             'NODE_USE_NODE_CODE_CACHE=1',
           ],
         }],
-        ['node_shared=="true" and OS=="aix"', {
+        ['node_shared=="true" and OS in "aix os400"', {
           'product_name': 'node_base',
         }],
         [ 'v8_enable_inspector==1', {
@@ -894,37 +913,6 @@
         },
       ],
     }, # node_lib_target_name
-    { # fuzz_url
-      'target_name': 'fuzz_url',
-      'type': 'executable',
-      'dependencies': [
-        '<(node_lib_target_name)',
-      ],
-      'includes': [
-        'node.gypi'
-      ],
-      'include_dirs': [
-        'src',
-      ],
-      'defines': [
-        'NODE_ARCH="<(target_arch)"',
-        'NODE_PLATFORM="<(OS)"',
-        'NODE_WANT_INTERNALS=1',
-      ],
-      'sources': [
-        'src/node_snapshot_stub.cc',
-        'test/fuzzers/fuzz_url.cc',
-      ],
-      'conditions': [
-        ['OS=="linux"', {
-          'ldflags': [ '-fsanitize=fuzzer' ]
-        }],
-        # Ensure that ossfuzz flag has been set and that we are on Linux
-        [ 'OS!="linux" or ossfuzz!="true"', {
-          'type': 'none',
-        }],
-      ],
-    }, # fuzz_url
     { # fuzz_env
       'target_name': 'fuzz_env',
       'type': 'executable',
@@ -976,6 +964,7 @@
         'deps/histogram/histogram.gyp:histogram',
         'deps/uvwasi/uvwasi.gyp:uvwasi',
         'deps/simdutf/simdutf.gyp:simdutf',
+        'deps/ada/ada.gyp:ada',
       ],
 
       'includes': [
@@ -1016,7 +1005,7 @@
         'test/cctest/test_sockaddr.cc',
         'test/cctest/test_traced_value.cc',
         'test/cctest/test_util.cc',
-        'test/cctest/test_url.cc',
+        'test/cctest/test_dataqueue.cc',
       ],
 
       'conditions': [
@@ -1072,6 +1061,7 @@
         '<(node_lib_target_name)',
         'deps/histogram/histogram.gyp:histogram',
         'deps/uvwasi/uvwasi.gyp:uvwasi',
+        'deps/ada/ada.gyp:ada',
       ],
 
       'includes': [
@@ -1141,6 +1131,7 @@
         '<(node_lib_target_name)',
         'deps/histogram/histogram.gyp:histogram',
         'deps/uvwasi/uvwasi.gyp:uvwasi',
+        'deps/ada/ada.gyp:ada',
       ],
 
       'includes': [
@@ -1191,7 +1182,7 @@
   ], # end targets
 
   'conditions': [
-    ['OS=="aix" and node_shared=="true"', {
+    ['OS in "aix os400" and node_shared=="true"', {
       'targets': [
         {
           'target_name': 'node_aix_shared',

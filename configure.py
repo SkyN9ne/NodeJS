@@ -45,7 +45,7 @@ from utils import SearchFiles
 parser = argparse.ArgumentParser()
 
 valid_os = ('win', 'mac', 'solaris', 'freebsd', 'openbsd', 'linux',
-            'android', 'aix', 'cloudabi', 'ios')
+            'android', 'aix', 'cloudabi', 'os400', 'ios')
 valid_arch = ('arm', 'arm64', 'ia32', 'mips', 'mipsel', 'mips64el', 'ppc',
               'ppc64', 'x64', 'x86', 'x86_64', 's390x', 'riscv64', 'loong64')
 valid_arm_float_abi = ('soft', 'softfp', 'hard')
@@ -145,6 +145,12 @@ parser.add_argument('--no-ifaddrs',
     dest='no_ifaddrs',
     default=None,
     help='use on deprecated SunOS systems that do not support ifaddrs.h')
+
+parser.add_argument('--disable-single-executable-application',
+    action='store_true',
+    dest='disable_single_executable_application',
+    default=None,
+    help='Disable Single Executable Application support.')
 
 parser.add_argument("--fully-static",
     action="store_true",
@@ -571,7 +577,7 @@ intl_optgroup.add_argument('--without-intl',
     action='store_const',
     dest='with_intl',
     const='none',
-    help='Disable Intl, same as --with-intl=none (disables inspector)')
+    help='Disable Intl, same as --with-intl=none')
 
 intl_optgroup.add_argument('--with-icu-path',
     action='store',
@@ -1026,8 +1032,8 @@ def check_compiler(o):
                 ('clang ' if is_clang else '', CXX, version_str))
   if not ok:
     warn('failed to autodetect C++ compiler version (CXX=%s)' % CXX)
-  elif clang_version < (8, 0, 0) if is_clang else gcc_version < (8, 3, 0):
-    warn('C++ compiler (CXX=%s, %s) too old, need g++ 8.3.0 or clang++ 8.0.0' %
+  elif clang_version < (8, 0, 0) if is_clang else gcc_version < (10, 1, 0):
+    warn('C++ compiler (CXX=%s, %s) too old, need g++ 10.1.0 or clang++ 8.0.0' %
          (CXX, version_str))
 
   ok, is_clang, clang_version, gcc_version = try_check_compiler(CC, 'c')
@@ -1296,7 +1302,7 @@ def configure_node(o):
   elif sys.platform == 'zos':
     configure_zos(o)
 
-  if flavor == 'aix':
+  if flavor in ('aix', 'os400'):
     o['variables']['node_target_type'] = 'static_library'
 
   if target_arch in ('x86', 'x64', 'ia32', 'x32'):
@@ -1357,6 +1363,10 @@ def configure_node(o):
   if options.no_ifaddrs:
     o['defines'] += ['SUNOS_NO_IFADDRS']
 
+  o['variables']['single_executable_application'] = b(not options.disable_single_executable_application)
+  if options.disable_single_executable_application:
+    o['defines'] += ['DISABLE_SINGLE_EXECUTABLE_APPLICATION']
+
   o['variables']['node_with_ltcg'] = b(options.with_ltcg)
   if flavor != 'win' and options.with_ltcg:
     raise Exception('Link Time Code Generation is only supported on Windows.')
@@ -1392,6 +1402,8 @@ def configure_node(o):
   elif sys.platform == 'darwin':
     shlib_suffix = '%s.dylib'
   elif sys.platform.startswith('aix'):
+    shlib_suffix = '%s.a'
+  elif sys.platform == 'os400':
     shlib_suffix = '%s.a'
   elif sys.platform.startswith('zos'):
     shlib_suffix = '%s.x'
@@ -1669,6 +1681,9 @@ def configure_intl(o):
   # always set icu_small, node.gyp depends on it being defined.
   o['variables']['icu_small'] = b(False)
 
+  # prevent data override
+  o['defines'] += ['ICU_NO_USER_DATA_OVERRIDE']
+
   with_intl = options.with_intl
   with_icu_source = options.with_icu_source
   have_icu_path = bool(options.with_icu_path)
@@ -1903,6 +1918,9 @@ def configure_intl(o):
   elif flavor == 'mac':
     icu_config['variables']['icu_asm_ext'] = 'S'
     icu_config['variables']['icu_asm_opts'] = [ '-a', 'gcc-darwin' ]
+  elif sys.platform == 'os400':
+    icu_config['variables']['icu_asm_ext'] = 'S'
+    icu_config['variables']['icu_asm_opts'] = [ '-a', 'xlc' ]
   elif sys.platform.startswith('aix'):
     icu_config['variables']['icu_asm_ext'] = 'S'
     icu_config['variables']['icu_asm_opts'] = [ '-a', 'xlc' ]
@@ -1921,7 +1939,6 @@ def configure_intl(o):
 
 def configure_inspector(o):
   disable_inspector = (options.without_inspector or
-                       options.with_intl in (None, 'none') or
                        options.without_ssl)
   o['variables']['v8_enable_inspector'] = 0 if disable_inspector else 1
 
