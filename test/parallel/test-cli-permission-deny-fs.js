@@ -1,9 +1,12 @@
 'use strict';
 
-require('../common');
+const common = require('../common');
+
+const fixtures = require('../common/fixtures');
 const { spawnSync } = require('child_process');
 const assert = require('assert');
 const fs = require('fs');
+const path = require('path');
 
 {
   const { status, stdout } = spawnSync(
@@ -24,11 +27,12 @@ const fs = require('fs');
 }
 
 {
+  const tmpPath = path.resolve('/tmp/');
   const { status, stdout } = spawnSync(
     process.execPath,
     [
       '--experimental-permission',
-      '--allow-fs-write', '/tmp/', '-e',
+      '--allow-fs-write', tmpPath, '-e',
       `console.log(process.permission.has("fs"));
       console.log(process.permission.has("fs.read"));
       console.log(process.permission.has("fs.write"));
@@ -125,4 +129,24 @@ const fs = require('fs');
     stderr);
   assert.strictEqual(status, 1);
   assert.ok(!fs.existsSync('permission-deny-example.md'));
+}
+
+{
+  const { root } = path.parse(process.cwd());
+  const abs = (p) => path.join(root, p);
+  const firstPath = abs(path.sep + process.cwd().split(path.sep, 2)[1]);
+  if (firstPath.startsWith('/etc')) {
+    common.skip('/etc as firstPath');
+  }
+  const file = fixtures.path('permission', 'loader', 'index.js');
+  const { status, stderr } = spawnSync(
+    process.execPath,
+    [
+      '--experimental-permission',
+      `--allow-fs-read=${firstPath}`,
+      file,
+    ]
+  );
+  assert.match(stderr.toString(), /resource: '.*?[\\/](?:etc|passwd)'/);
+  assert.strictEqual(status, 1);
 }

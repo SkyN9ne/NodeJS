@@ -13,7 +13,6 @@ const assert = require('assert');
 const dgram = require('dgram');
 const { Resolver } = require('dns');
 const { request, createServer } = require('https');
-const { setDefaultAutoSelectFamilyAttemptTimeout } = require('net');
 
 if (!common.hasCrypto)
   common.skip('missing crypto');
@@ -24,9 +23,6 @@ const options = {
 };
 
 // Test that happy eyeballs algorithm is properly implemented when using HTTP.
-
-// Some of the windows machines in the CI need more time to establish connection
-setDefaultAutoSelectFamilyAttemptTimeout(common.platformTimeout(common.isWindows ? 1500 : 250));
 
 function _lookup(resolver, hostname, options, cb) {
   resolver.resolve(hostname, 'ANY', (err, replies) => {
@@ -78,7 +74,8 @@ function createDnsServer(ipv6Addr, ipv4Addr, cb) {
 // Test that IPV4 is reached if IPV6 is not reachable
 {
   createDnsServer('::1', '127.0.0.1', common.mustCall(function({ dnsServer, lookup }) {
-    const ipv4Server = createServer(options, common.mustCall((_, res) => {
+    const ipv4Server = createServer(options, common.mustCall((req, res) => {
+      assert.strictEqual(req.socket.servername, 'example.org');
       res.writeHead(200, { Connection: 'close' });
       res.end('response-ipv4');
     }));
@@ -90,6 +87,7 @@ function createDnsServer(ipv6Addr, ipv4Addr, cb) {
           lookup,
           rejectUnauthorized: false,
           autoSelectFamily: true,
+          servername: 'example.org',
         },
         (res) => {
           assert.strictEqual(res.statusCode, 200);
@@ -115,12 +113,14 @@ function createDnsServer(ipv6Addr, ipv4Addr, cb) {
 // Test that IPV4 is NOT reached if IPV6 is reachable
 if (common.hasIPv6) {
   createDnsServer('::1', '127.0.0.1', common.mustCall(function({ dnsServer, lookup }) {
-    const ipv4Server = createServer(options, common.mustNotCall((_, res) => {
+    const ipv4Server = createServer(options, common.mustNotCall((req, res) => {
+      assert.strictEqual(req.socket.servername, 'example.org');
       res.writeHead(200, { Connection: 'close' });
       res.end('response-ipv4');
     }));
 
-    const ipv6Server = createServer(options, common.mustCall((_, res) => {
+    const ipv6Server = createServer(options, common.mustCall((req, res) => {
+      assert.strictEqual(req.socket.servername, 'example.org');
       res.writeHead(200, { Connection: 'close' });
       res.end('response-ipv6');
     }));
@@ -135,6 +135,7 @@ if (common.hasIPv6) {
             lookup,
             rejectUnauthorized: false,
             autoSelectFamily: true,
+            servername: 'example.org',
           },
           (res) => {
             assert.strictEqual(res.statusCode, 200);

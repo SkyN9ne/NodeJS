@@ -33,11 +33,18 @@ If you find a potential security vulnerability, please refer to our
 
 Node.js contains experimental support for creating policies on loading code.
 
-Policies are a security feature intended to allow guarantees
-about what code Node.js is able to load. The use of policies assumes
-safe practices for the policy files such as ensuring that policy
-files cannot be overwritten by the Node.js application by using
-file permissions.
+Policies are a security feature intended to ensure the integrity
+of the loaded code.
+
+While it does not function as a provenance mechanism to trace the origin of
+code, it serves as a robust defense against the execution of malicious code.
+Unlike runtime-based models that may restrict capabilities once the code is
+loaded, Node.js policies focus on preventing malicious code from ever being
+fully loaded into the application in the first place.
+
+The use of policies assumes safe practices for the policy
+files such as ensuring that policy files cannot be overwritten by the Node.js
+application by using file permissions.
 
 A best practice would be to ensure that the policy manifest is read-only for
 the running Node.js application and that the file cannot be changed
@@ -202,12 +209,6 @@ the manifest and then immediately used without searching.
 Any specifier string for which resolution is attempted and that is not listed in
 the dependencies results in an error according to the policy.
 
-Redirection does not prevent access to APIs through means such as direct access
-to `require.cache` or through `module.constructor` which allow access to
-loading modules. Policy redirection only affects specifiers to `require()` and
-`import`. Other means, such as to prevent undesired access to APIs through
-variables, are necessary to lock down that path of loading modules.
-
 A boolean value of `true` for the dependencies map can be specified to allow a
 module to load any specifier without redirection. This can be useful for local
 development and may have some valid usage in production, but should be used
@@ -223,6 +224,9 @@ can be used to ensure some kinds of dynamic access are explicitly prevented.
 
 Unknown values for the resolved module location cause failures but are
 not guaranteed to be forward compatible.
+
+All the guarantees for policy redirection are specified in the
+[Guarantees](#guarantees) section.
 
 ##### Example: Patched dependency
 
@@ -388,7 +392,7 @@ The following example, would allow access to `fs` for all `data:` resources:
 }
 ```
 
-##### Example: [import maps][] emulation
+##### Example: import maps emulation
 
 Given an import map:
 
@@ -425,7 +429,7 @@ Given an import map:
 }
 ```
 
-Import maps assume you can get any resource by default. This means
+[Import maps][] assume you can get any resource by default. This means
 `"dependencies"` at the top level of the policy should be set to `true`.
 Policies require this to be opt-in since it enables all resources of the
 application cross linkage which doesn't make sense for many scenarios. They also
@@ -446,6 +450,18 @@ not adopt the origin of the `blob:` URL.
 Additionally, import maps only work on `import` so it may be desirable to add a
 `"import"` condition to all dependency mappings.
 
+#### Guarantees
+
+* The policies guarantee the file integrity when a module is loaded using
+  `require()`, `import()` or `new Module()`.
+* Redirection does not prevent access to APIs through means such as direct
+  access to `require.cache` which allow access to loaded modules.
+  Policy redirection only affects specifiers to `require()` and
+  `import`.
+* The approval of the module integrity in policies threat model implies
+  they are allowed to muck with and even circumvent security features once
+  loaded so environmental/runtime hardening is expected.
+
 ## Process-based permissions
 
 ### Permission Model
@@ -465,8 +481,9 @@ The available permissions are documented by the [`--experimental-permission`][]
 flag.
 
 When starting Node.js with `--experimental-permission`,
-the ability to access the file system, spawn processes, and
-use `node:worker_threads` will be restricted.
+the ability to access the file system through the `fs` module, spawn processes,
+use `node:worker_threads` and enable the runtime inspector
+will be restricted.
 
 ```console
 $ node --experimental-permission index.js
@@ -492,26 +509,9 @@ using the [`--allow-child-process`][] and [`--allow-worker`][] respectively.
 
 When enabling the Permission Model through the [`--experimental-permission`][]
 flag a new property `permission` is added to the `process` object.
-This property contains two functions:
+This property contains one function:
 
-##### `permission.deny(scope [,parameters])`
-
-API call to deny permissions at runtime ([`permission.deny()`][])
-
-```js
-process.permission.deny('fs'); // Deny permissions to ALL fs operations
-
-// Deny permissions to ALL FileSystemWrite operations
-process.permission.deny('fs.write');
-// deny FileSystemWrite permissions to the protected-folder
-process.permission.deny('fs.write', ['/home/rafaelgss/protected-folder']);
-// Deny permissions to ALL FileSystemRead operations
-process.permission.deny('fs.read');
-// deny FileSystemRead permissions to the protected-folder
-process.permission.deny('fs.read', ['/home/rafaelgss/protected-folder']);
-```
-
-##### `permission.has(scope ,parameters)`
+##### `permission.has(scope[, reference])`
 
 API call to check permissions at runtime ([`permission.has()`][])
 
@@ -519,10 +519,8 @@ API call to check permissions at runtime ([`permission.has()`][])
 process.permission.has('fs.write'); // true
 process.permission.has('fs.write', '/home/rafaelgss/protected-folder'); // true
 
-process.permission.deny('fs.write', '/home/rafaelgss/protected-folder');
-
-process.permission.has('fs.write'); // true
-process.permission.has('fs.write', '/home/rafaelgss/protected-folder'); // false
+process.permission.has('fs.read'); // true
+process.permission.has('fs.read', '/home/rafaelgss/protected-folder'); // false
 ```
 
 #### File System Permissions
@@ -539,8 +537,10 @@ Hello world!
 
 The valid arguments for both flags are:
 
-* `*` - To allow the all operations to given scope (read/write).
-* Paths delimited by comma (,) to manage reading/writing operations.
+* `*` - To allow all `FileSystemRead` or `FileSystemWrite` operations,
+  respectively.
+* Paths delimited by comma (`,`) to allow only matching `FileSystemRead` or
+  `FileSystemWrite` operations, respectively.
 
 Example:
 
@@ -548,52 +548,37 @@ Example:
 * `--allow-fs-write=*` - It will allow all `FileSystemWrite` operations.
 * `--allow-fs-write=/tmp/` - It will allow `FileSystemWrite` access to the `/tmp/`
   folder.
-* `--allow-fs-read=/tmp/,/home/.gitignore` - It allows `FileSystemRead` access
+* `--allow-fs-read=/tmp/ --allow-fs-read=/home/.gitignore` - It allows `FileSystemRead` access
   to the `/tmp/` folder **and** the `/home/.gitignore` path.
 
 Wildcards are supported too:
 
-* `--allow-fs-read:/home/test*` will allow read access to everything
+* `--allow-fs-read=/home/test*` will allow read access to everything
   that matches the wildcard. e.g: `/home/test/file1` or `/home/test2`
+
+#### Limitations and known issues
 
 There are constraints you need to know before using this system:
 
+* When the permission model is enabled, Node.js may resolve some paths
+  differently than when it is disabled.
 * Native modules are restricted by default when using the Permission Model.
+* OpenSSL engines currently cannot be requested at runtime when the Permission
+  Model is enabled, affecting the built-in crypto, https, and tls modules.
 * Relative paths are not supported through the CLI (`--allow-fs-*`).
-  The runtime API supports relative paths.
 * The model does not inherit to a child node process.
 * The model does not inherit to a worker thread.
 * When creating symlinks the target (first argument) should have read and
   write access.
 * Permission changes are not retroactively applied to existing resources.
-  Consider the following snippet:
-  ```js
-  const fs = require('node:fs');
 
-  // Open a fd
-  const fd = fs.openSync('./README.md', 'r');
-  // Then, deny access to all fs.read operations
-  process.permission.deny('fs.read');
-  // This call will NOT fail and the file will be read
-  const data = fs.readFileSync(fd);
-  ```
-
-Therefore, when possible, apply the permissions rules before any statement:
-
-```js
-process.permission.deny('fs.read');
-const fd = fs.openSync('./README.md', 'r');
-// Error: Access to this API has been restricted
-```
-
+[Import maps]: https://url.spec.whatwg.org/#relative-url-with-fragment-string
 [Security Policy]: https://github.com/nodejs/node/blob/main/SECURITY.md
 [`--allow-child-process`]: cli.md#--allow-child-process
 [`--allow-fs-read`]: cli.md#--allow-fs-read
 [`--allow-fs-write`]: cli.md#--allow-fs-write
 [`--allow-worker`]: cli.md#--allow-worker
 [`--experimental-permission`]: cli.md#--experimental-permission
-[`permission.deny()`]: process.md#processpermissiondenyscope-reference
 [`permission.has()`]: process.md#processpermissionhasscope-reference
-[import maps]: https://url.spec.whatwg.org/#relative-url-with-fragment-string
 [relative-url string]: https://url.spec.whatwg.org/#relative-url-with-fragment-string
 [special schemes]: https://url.spec.whatwg.org/#special-scheme

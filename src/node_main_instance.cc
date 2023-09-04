@@ -56,6 +56,8 @@ NodeMainInstance::NodeMainInstance(const SnapshotData* snapshot_data,
                         platform,
                         array_buffer_allocator_.get(),
                         snapshot_data->AsEmbedderWrapper().get()));
+  isolate_data_->set_is_building_snapshot(
+      per_process::cli_options->per_isolate->build_snapshot);
 
   isolate_data_->max_young_gen_size =
       isolate_params_->constraints.max_young_generation_size_in_bytes();
@@ -66,6 +68,8 @@ NodeMainInstance::~NodeMainInstance() {
     return;
   }
   // This should only be done on a main instance that owns its isolate.
+  // IsolateData must be freed before UnregisterIsolate() is called.
+  isolate_data_.reset();
   platform_->UnregisterIsolate(isolate_);
   isolate_->Dispose();
 }
@@ -87,14 +91,20 @@ ExitCode NodeMainInstance::Run() {
 
 void NodeMainInstance::Run(ExitCode* exit_code, Environment* env) {
   if (*exit_code == ExitCode::kNoFailure) {
-    bool is_sea = false;
+    bool runs_sea_code = false;
 #ifndef DISABLE_SINGLE_EXECUTABLE_APPLICATION
     if (sea::IsSingleExecutable()) {
-      is_sea = true;
-      LoadEnvironment(env, sea::FindSingleExecutableCode());
+      sea::SeaResource sea = sea::FindSingleExecutableResource();
+      if (!sea.use_snapshot()) {
+        runs_sea_code = true;
+        std::string_view code = sea.main_code_or_snapshot;
+        LoadEnvironment(env, code);
+      }
     }
 #endif
-    if (!is_sea) {
+    // Either there is already a snapshot main function from SEA, or it's not
+    // a SEA at all.
+    if (!runs_sea_code) {
       LoadEnvironment(env, StartExecutionCallback{});
     }
 

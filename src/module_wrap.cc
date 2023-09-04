@@ -78,7 +78,7 @@ ModuleWrap::~ModuleWrap() {
 }
 
 Local<Context> ModuleWrap::context() const {
-  Local<Value> obj = object()->GetInternalField(kContextObjectSlot);
+  Local<Value> obj = object()->GetInternalField(kContextObjectSlot).As<Value>();
   if (obj.IsEmpty()) return {};
   return obj.As<Object>()->GetCreationContext().ToLocalChecked();
 }
@@ -361,7 +361,7 @@ void ModuleWrap::Evaluate(const FunctionCallbackInfo<Value>& args) {
   Local<Module> module = obj->module_.Get(isolate);
 
   ContextifyContext* contextify_context = obj->contextify_context_;
-  std::shared_ptr<MicrotaskQueue> microtask_queue;
+  MicrotaskQueue* microtask_queue = nullptr;
   if (contextify_context != nullptr)
       microtask_queue = contextify_context->microtask_queue();
 
@@ -684,7 +684,9 @@ MaybeLocal<Value> ModuleWrap::SyntheticModuleEvaluationStepsCallback(
 
   TryCatchScope try_catch(env);
   Local<Function> synthetic_evaluation_steps =
-      obj->object()->GetInternalField(kSyntheticEvaluationStepsSlot)
+      obj->object()
+          ->GetInternalField(kSyntheticEvaluationStepsSlot)
+          .As<Value>()
           .As<Function>();
   obj->object()->SetInternalField(
       kSyntheticEvaluationStepsSlot, Undefined(isolate));
@@ -768,7 +770,6 @@ void ModuleWrap::Initialize(Local<Object> target,
   Local<FunctionTemplate> tpl = NewFunctionTemplate(isolate, New);
   tpl->InstanceTemplate()->SetInternalFieldCount(
       ModuleWrap::kInternalFieldCount);
-  tpl->Inherit(BaseObject::GetConstructorTemplate(env));
 
   SetProtoMethod(isolate, tpl, "link", Link);
   SetProtoMethod(isolate, tpl, "instantiate", Instantiate);

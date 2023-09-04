@@ -19,11 +19,14 @@
 // OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
 // USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "node_file.h"  // NOLINT(build/include_inline)
+#include "ada.h"
 #include "aliased_buffer-inl.h"
 #include "memory_tracker-inl.h"
 #include "node_buffer.h"
+#include "node_errors.h"
 #include "node_external_reference.h"
 #include "node_file-inl.h"
+#include "node_metadata.h"
 #include "node_process-inl.h"
 #include "node_stat_watcher.h"
 #include "permission/permission.h"
@@ -54,7 +57,6 @@ namespace fs {
 
 using v8::Array;
 using v8::BigInt;
-using v8::Boolean;
 using v8::Context;
 using v8::EscapableHandleScope;
 using v8::Function;
@@ -64,14 +66,16 @@ using v8::HandleScope;
 using v8::Int32;
 using v8::Integer;
 using v8::Isolate;
+using v8::JustVoid;
 using v8::Local;
+using v8::Maybe;
 using v8::MaybeLocal;
+using v8::Nothing;
 using v8::Number;
 using v8::Object;
 using v8::ObjectTemplate;
 using v8::Promise;
 using v8::String;
-using v8::Symbol;
 using v8::Undefined;
 using v8::Value;
 
@@ -260,17 +264,17 @@ FileHandle* FileHandle::New(BindingData* binding_data,
 }
 
 void FileHandle::New(const FunctionCallbackInfo<Value>& args) {
-  BindingData* binding_data = Realm::GetBindingData<BindingData>(args);
-  Environment* env = binding_data->env();
   CHECK(args.IsConstructCall());
   CHECK(args[0]->IsInt32());
+  Realm* realm = Realm::GetCurrent(args);
+  BindingData* binding_data = realm->GetBindingData<BindingData>();
 
   std::optional<int64_t> maybeOffset = std::nullopt;
   std::optional<int64_t> maybeLength = std::nullopt;
   if (args[1]->IsNumber())
-    maybeOffset = args[1]->IntegerValue(env->context()).FromJust();
+    maybeOffset = args[1]->IntegerValue(realm->context()).FromJust();
   if (args[2]->IsNumber())
-    maybeLength = args[2]->IntegerValue(env->context()).FromJust();
+    maybeLength = args[2]->IntegerValue(realm->context()).FromJust();
 
   FileHandle::New(binding_data,
                   args[0].As<Int32>()->Value(),
@@ -296,13 +300,14 @@ void FileHandle::MemoryInfo(MemoryTracker* tracker) const {
   tracker->TrackField("current_read", current_read_);
 }
 
-FileHandle::TransferMode FileHandle::GetTransferMode() const {
-  return reading_ || closing_ || closed_ ?
-      TransferMode::kUntransferable : TransferMode::kTransferable;
+BaseObject::TransferMode FileHandle::GetTransferMode() const {
+  return reading_ || closing_ || closed_
+             ? TransferMode::kDisallowCloneAndTransfer
+             : TransferMode::kTransferable;
 }
 
 std::unique_ptr<worker::TransferData> FileHandle::TransferForMessaging() {
-  CHECK_NE(GetTransferMode(), TransferMode::kUntransferable);
+  CHECK_NE(GetTransferMode(), TransferMode::kDisallowCloneAndTransfer);
   auto ret = std::make_unique<TransferData>(fd_);
   closed_ = true;
   return ret;
@@ -451,7 +456,7 @@ MaybeLocal<Promise> FileHandle::ClosePromise() {
   Local<Context> context = env()->context();
 
   Local<Value> close_resolver =
-      object()->GetInternalField(FileHandle::kClosingPromiseSlot);
+      object()->GetInternalField(FileHandle::kClosingPromiseSlot).As<Value>();
   if (!close_resolver.IsEmpty() && !close_resolver->IsUndefined()) {
     CHECK(close_resolver->IsPromise());
     return close_resolver.As<Promise>();
@@ -1030,7 +1035,6 @@ static void InternalModuleReadJSON(const FunctionCallbackInfo<Value>& args) {
       env, permission::PermissionScope::kFileSystemRead, path.ToStringView());
 
   if (strlen(*path) != path.length()) {
-    args.GetReturnValue().Set(Array::New(isolate));
     return;  // Contains a nul byte.
   }
   uv_fs_t open_req;
@@ -1038,7 +1042,6 @@ static void InternalModuleReadJSON(const FunctionCallbackInfo<Value>& args) {
   uv_fs_req_cleanup(&open_req);
 
   if (fd < 0) {
-    args.GetReturnValue().Set(Array::New(isolate));
     return;
   }
 
@@ -1065,55 +1068,21 @@ static void InternalModuleReadJSON(const FunctionCallbackInfo<Value>& args) {
     uv_fs_req_cleanup(&read_req);
 
     if (numchars < 0) {
-      args.GetReturnValue().Set(Array::New(isolate));
       return;
     }
     offset += numchars;
   } while (static_cast<size_t>(numchars) == kBlockSize);
 
   size_t start = 0;
-  if (offset >= 3 && 0 == memcmp(&chars[0], "\xEF\xBB\xBF", 3)) {
+  if (offset >= 3 && 0 == memcmp(chars.data(), "\xEF\xBB\xBF", 3)) {
     start = 3;  // Skip UTF-8 BOM.
   }
-
   const size_t size = offset - start;
-  char* p = &chars[start];
-  char* pe = &chars[size];
-  char* pos[2];
-  char** ppos = &pos[0];
 
-  while (p < pe) {
-    char c = *p++;
-    if (c == '\\' && p < pe && *p == '"') p++;
-    if (c != '"') continue;
-    *ppos++ = p;
-    if (ppos < &pos[2]) continue;
-    ppos = &pos[0];
-
-    char* s = &pos[0][0];
-    char* se = &pos[1][-1];  // Exclude quote.
-    size_t n = se - s;
-
-    if (n == 4) {
-      if (0 == memcmp(s, "main", 4)) break;
-      if (0 == memcmp(s, "name", 4)) break;
-      if (0 == memcmp(s, "type", 4)) break;
-    } else if (n == 7) {
-      if (0 == memcmp(s, "exports", 7)) break;
-      if (0 == memcmp(s, "imports", 7)) break;
-    }
-  }
-
-
-  Local<Value> return_value[] = {
-    String::NewFromUtf8(isolate,
-                        &chars[start],
-                        v8::NewStringType::kNormal,
-                        size).ToLocalChecked(),
-    Boolean::New(isolate, p < pe ? true : false)
-  };
   args.GetReturnValue().Set(
-    Array::New(isolate, return_value, arraysize(return_value)));
+      String::NewFromUtf8(
+          isolate, &chars[start], v8::NewStringType::kNormal, size)
+          .ToLocalChecked());
 }
 
 // Used to speed up module loading.  Returns 0 if the path refers to
@@ -1139,13 +1108,14 @@ static void InternalModuleStat(const FunctionCallbackInfo<Value>& args) {
 }
 
 static void Stat(const FunctionCallbackInfo<Value>& args) {
-  BindingData* binding_data = Realm::GetBindingData<BindingData>(args);
-  Environment* env = binding_data->env();
+  Realm* realm = Realm::GetCurrent(args);
+  BindingData* binding_data = realm->GetBindingData<BindingData>();
+  Environment* env = realm->env();
 
   const int argc = args.Length();
   CHECK_GE(argc, 2);
 
-  BufferValue path(env->isolate(), args[0]);
+  BufferValue path(realm->isolate(), args[0]);
   CHECK_NOT_NULL(*path);
   THROW_IF_INSUFFICIENT_PERMISSIONS(
       env, permission::PermissionScope::kFileSystemRead, path.ToStringView());
@@ -1174,13 +1144,14 @@ static void Stat(const FunctionCallbackInfo<Value>& args) {
 }
 
 static void LStat(const FunctionCallbackInfo<Value>& args) {
-  BindingData* binding_data = Realm::GetBindingData<BindingData>(args);
-  Environment* env = binding_data->env();
+  Realm* realm = Realm::GetCurrent(args);
+  BindingData* binding_data = realm->GetBindingData<BindingData>();
+  Environment* env = realm->env();
 
   const int argc = args.Length();
   CHECK_GE(argc, 3);
 
-  BufferValue path(env->isolate(), args[0]);
+  BufferValue path(realm->isolate(), args[0]);
   CHECK_NOT_NULL(*path);
 
   bool use_bigint = args[1]->IsTrue();
@@ -1208,8 +1179,9 @@ static void LStat(const FunctionCallbackInfo<Value>& args) {
 }
 
 static void FStat(const FunctionCallbackInfo<Value>& args) {
-  BindingData* binding_data = Realm::GetBindingData<BindingData>(args);
-  Environment* env = binding_data->env();
+  Realm* realm = Realm::GetCurrent(args);
+  BindingData* binding_data = realm->GetBindingData<BindingData>();
+  Environment* env = realm->env();
 
   const int argc = args.Length();
   CHECK_GE(argc, 2);
@@ -1240,14 +1212,17 @@ static void FStat(const FunctionCallbackInfo<Value>& args) {
 }
 
 static void StatFs(const FunctionCallbackInfo<Value>& args) {
-  BindingData* binding_data = Realm::GetBindingData<BindingData>(args);
-  Environment* env = binding_data->env();
+  Realm* realm = Realm::GetCurrent(args);
+  BindingData* binding_data = realm->GetBindingData<BindingData>();
+  Environment* env = realm->env();
 
   const int argc = args.Length();
   CHECK_GE(argc, 2);
 
-  BufferValue path(env->isolate(), args[0]);
+  BufferValue path(realm->isolate(), args[0]);
   CHECK_NOT_NULL(*path);
+  THROW_IF_INSUFFICIENT_PERMISSIONS(
+      env, permission::PermissionScope::kFileSystemRead, path.ToStringView());
 
   bool use_bigint = args[1]->IsTrue();
   FSReqBase* req_wrap_async = GetReqWrap(args, 2, use_bigint);
@@ -1335,8 +1310,18 @@ static void Link(const FunctionCallbackInfo<Value>& args) {
   BufferValue src(isolate, args[0]);
   CHECK_NOT_NULL(*src);
 
+  const auto src_view = src.ToStringView();
+  // To avoid bypass the link target should be allowed to read and write
+  THROW_IF_INSUFFICIENT_PERMISSIONS(
+      env, permission::PermissionScope::kFileSystemRead, src_view);
+  THROW_IF_INSUFFICIENT_PERMISSIONS(
+      env, permission::PermissionScope::kFileSystemWrite, src_view);
+
   BufferValue dest(isolate, args[1]);
   CHECK_NOT_NULL(*dest);
+  const auto dest_view = dest.ToStringView();
+  THROW_IF_INSUFFICIENT_PERMISSIONS(
+      env, permission::PermissionScope::kFileSystemWrite, dest_view);
 
   FSReqBase* req_wrap_async = GetReqWrap(args, 2);
   if (req_wrap_async != nullptr) {  // link(src, dest, req)
@@ -1949,6 +1934,105 @@ static void ReadDir(const FunctionCallbackInfo<Value>& args) {
   }
 }
 
+static inline Maybe<void> CheckOpenPermissions(Environment* env,
+                                               const BufferValue& path,
+                                               int flags) {
+  // These flags capture the intention of the open() call.
+  const int rwflags = flags & (UV_FS_O_RDONLY | UV_FS_O_WRONLY | UV_FS_O_RDWR);
+
+  // These flags have write-like side effects even with O_RDONLY, at least on
+  // some operating systems. On Windows, for example, O_RDONLY | O_TEMPORARY
+  // can be used to delete a file. Bizarre.
+  const int write_as_side_effect = flags & (UV_FS_O_APPEND | UV_FS_O_CREAT |
+                                            UV_FS_O_TRUNC | UV_FS_O_TEMPORARY);
+
+  // TODO(rafaelgss): it can be optimized to avoid two permission checks
+  auto pathView = path.ToStringView();
+  if (rwflags != UV_FS_O_WRONLY) {
+    THROW_IF_INSUFFICIENT_PERMISSIONS(
+        env,
+        permission::PermissionScope::kFileSystemRead,
+        pathView,
+        Nothing<void>());
+  }
+  if (rwflags != UV_FS_O_RDONLY || write_as_side_effect) {
+    THROW_IF_INSUFFICIENT_PERMISSIONS(
+        env,
+        permission::PermissionScope::kFileSystemWrite,
+        pathView,
+        Nothing<void>());
+  }
+  return JustVoid();
+}
+
+static void ReadFileSync(const FunctionCallbackInfo<Value>& args) {
+  Environment* env = Environment::GetCurrent(args);
+  auto isolate = env->isolate();
+
+  CHECK_GE(args.Length(), 2);
+
+  BufferValue path(env->isolate(), args[0]);
+  CHECK_NOT_NULL(*path);
+
+  CHECK(args[1]->IsInt32());
+  const int flags = args[1].As<Int32>()->Value();
+
+  if (CheckOpenPermissions(env, path, flags).IsNothing()) return;
+
+  uv_fs_t req;
+  auto defer_req_cleanup = OnScopeLeave([&req]() { uv_fs_req_cleanup(&req); });
+
+  FS_SYNC_TRACE_BEGIN(open);
+  uv_file file = uv_fs_open(nullptr, &req, *path, flags, 438, nullptr);
+  FS_SYNC_TRACE_END(open);
+  if (req.result < 0) {
+    // req will be cleaned up by scope leave.
+    Local<Value> out[] = {
+        Integer::New(isolate, req.result),       // errno
+        FIXED_ONE_BYTE_STRING(isolate, "open"),  // syscall
+    };
+    return args.GetReturnValue().Set(Array::New(isolate, out, arraysize(out)));
+  }
+  uv_fs_req_cleanup(&req);
+
+  auto defer_close = OnScopeLeave([file]() {
+    uv_fs_t close_req;
+    CHECK_EQ(0, uv_fs_close(nullptr, &close_req, file, nullptr));
+    uv_fs_req_cleanup(&close_req);
+  });
+
+  std::string result{};
+  char buffer[8192];
+  uv_buf_t buf = uv_buf_init(buffer, sizeof(buffer));
+
+  FS_SYNC_TRACE_BEGIN(read);
+  while (true) {
+    auto r = uv_fs_read(nullptr, &req, file, &buf, 1, -1, nullptr);
+    if (req.result < 0) {
+      FS_SYNC_TRACE_END(read);
+      // req will be cleaned up by scope leave.
+      Local<Value> out[] = {
+          Integer::New(isolate, req.result),       // errno
+          FIXED_ONE_BYTE_STRING(isolate, "read"),  // syscall
+      };
+      return args.GetReturnValue().Set(
+          Array::New(isolate, out, arraysize(out)));
+    }
+    uv_fs_req_cleanup(&req);
+    if (r <= 0) {
+      break;
+    }
+    result.append(buf.base, r);
+  }
+  FS_SYNC_TRACE_END(read);
+
+  args.GetReturnValue().Set(String::NewFromUtf8(env->isolate(),
+                                                result.data(),
+                                                v8::NewStringType::kNormal,
+                                                result.size())
+                                .ToLocalChecked());
+}
+
 static void Open(const FunctionCallbackInfo<Value>& args) {
   Environment* env = Environment::GetCurrent(args);
 
@@ -1964,22 +2048,7 @@ static void Open(const FunctionCallbackInfo<Value>& args) {
   CHECK(args[2]->IsInt32());
   const int mode = args[2].As<Int32>()->Value();
 
-  auto pathView = path.ToStringView();
-  // Open can be called either in write or read
-  if (flags == O_RDWR) {
-    // TODO(rafaelgss): it can be optimized to avoid O(2*n)
-    THROW_IF_INSUFFICIENT_PERMISSIONS(
-        env, permission::PermissionScope::kFileSystemRead, pathView);
-    THROW_IF_INSUFFICIENT_PERMISSIONS(
-        env, permission::PermissionScope::kFileSystemWrite, pathView);
-  } else if ((flags & ~(UV_FS_O_RDONLY | UV_FS_O_SYNC)) == 0) {
-    THROW_IF_INSUFFICIENT_PERMISSIONS(
-        env, permission::PermissionScope::kFileSystemRead, pathView);
-  } else if ((flags & (UV_FS_O_APPEND | UV_FS_O_TRUNC | UV_FS_O_CREAT |
-                       UV_FS_O_WRONLY)) != 0) {
-    THROW_IF_INSUFFICIENT_PERMISSIONS(
-        env, permission::PermissionScope::kFileSystemWrite, pathView);
-  }
+  if (CheckOpenPermissions(env, path, flags).IsNothing()) return;
 
   FSReqBase* req_wrap_async = GetReqWrap(args, 3);
   if (req_wrap_async != nullptr) {  // open(path, flags, mode, req)
@@ -2001,18 +2070,15 @@ static void Open(const FunctionCallbackInfo<Value>& args) {
 }
 
 static void OpenFileHandle(const FunctionCallbackInfo<Value>& args) {
-  BindingData* binding_data = Realm::GetBindingData<BindingData>(args);
-  Environment* env = binding_data->env();
-  Isolate* isolate = env->isolate();
+  Realm* realm = Realm::GetCurrent(args);
+  BindingData* binding_data = realm->GetBindingData<BindingData>();
+  Environment* env = realm->env();
 
   const int argc = args.Length();
   CHECK_GE(argc, 3);
 
-  BufferValue path(isolate, args[0]);
+  BufferValue path(realm->isolate(), args[0]);
   CHECK_NOT_NULL(*path);
-  auto pathView = path.ToStringView();
-  THROW_IF_INSUFFICIENT_PERMISSIONS(
-      env, permission::PermissionScope::kFileSystemRead, pathView);
 
   CHECK(args[1]->IsInt32());
   const int flags = args[1].As<Int32>()->Value();
@@ -2020,21 +2086,7 @@ static void OpenFileHandle(const FunctionCallbackInfo<Value>& args) {
   CHECK(args[2]->IsInt32());
   const int mode = args[2].As<Int32>()->Value();
 
-  // Open can be called either in write or read
-  if (flags == O_RDWR) {
-    // TODO(rafaelgss): it can be optimized to avoid O(2*n)
-    THROW_IF_INSUFFICIENT_PERMISSIONS(
-        env, permission::PermissionScope::kFileSystemRead, pathView);
-    THROW_IF_INSUFFICIENT_PERMISSIONS(
-        env, permission::PermissionScope::kFileSystemWrite, pathView);
-  } else if ((flags & ~(UV_FS_O_RDONLY | UV_FS_O_SYNC)) == 0) {
-    THROW_IF_INSUFFICIENT_PERMISSIONS(
-        env, permission::PermissionScope::kFileSystemRead, pathView);
-  } else if ((flags & (UV_FS_O_APPEND | UV_FS_O_TRUNC | UV_FS_O_CREAT |
-                       UV_FS_O_WRONLY)) != 0) {
-    THROW_IF_INSUFFICIENT_PERMISSIONS(
-        env, permission::PermissionScope::kFileSystemWrite, pathView);
-  }
+  if (CheckOpenPermissions(env, path, flags).IsNothing()) return;
 
   FSReqBase* req_wrap_async = GetReqWrap(args, 3);
   if (req_wrap_async != nullptr) {  // openFileHandle(path, flags, mode, req)
@@ -2420,6 +2472,8 @@ static void Chmod(const FunctionCallbackInfo<Value>& args) {
 
   BufferValue path(env->isolate(), args[0]);
   CHECK_NOT_NULL(*path);
+  THROW_IF_INSUFFICIENT_PERMISSIONS(
+      env, permission::PermissionScope::kFileSystemWrite, path.ToStringView());
 
   CHECK(args[1]->IsInt32());
   int mode = args[1].As<Int32>()->Value();
@@ -2483,6 +2537,8 @@ static void Chown(const FunctionCallbackInfo<Value>& args) {
 
   BufferValue path(env->isolate(), args[0]);
   CHECK_NOT_NULL(*path);
+  THROW_IF_INSUFFICIENT_PERMISSIONS(
+      env, permission::PermissionScope::kFileSystemWrite, path.ToStringView());
 
   CHECK(IsSafeJsInt(args[1]));
   const uv_uid_t uid = static_cast<uv_uid_t>(args[1].As<Integer>()->Value());
@@ -2549,6 +2605,8 @@ static void LChown(const FunctionCallbackInfo<Value>& args) {
 
   BufferValue path(env->isolate(), args[0]);
   CHECK_NOT_NULL(*path);
+  THROW_IF_INSUFFICIENT_PERMISSIONS(
+      env, permission::PermissionScope::kFileSystemWrite, path.ToStringView());
 
   CHECK(IsSafeJsInt(args[1]));
   const uv_uid_t uid = static_cast<uv_uid_t>(args[1].As<Integer>()->Value());
@@ -2644,6 +2702,8 @@ static void LUTimes(const FunctionCallbackInfo<Value>& args) {
 
   BufferValue path(env->isolate(), args[0]);
   CHECK_NOT_NULL(*path);
+  THROW_IF_INSUFFICIENT_PERMISSIONS(
+      env, permission::PermissionScope::kFileSystemWrite, path.ToStringView());
 
   CHECK(args[1]->IsNumber());
   const double atime = args[1].As<Number>()->Value();
@@ -2676,6 +2736,8 @@ static void Mkdtemp(const FunctionCallbackInfo<Value>& args) {
 
   BufferValue tmpl(isolate, args[0]);
   CHECK_NOT_NULL(*tmpl);
+  THROW_IF_INSUFFICIENT_PERMISSIONS(
+      env, permission::PermissionScope::kFileSystemWrite, tmpl.ToStringView());
 
   const enum encoding encoding = ParseEncoding(isolate, args[1], UTF8);
 
@@ -2706,6 +2768,293 @@ static void Mkdtemp(const FunctionCallbackInfo<Value>& args) {
   }
 }
 
+static bool FileURLToPath(
+    Environment* env,
+    const ada::url_aggregator& file_url,
+    /* The linter can't detect the assign for result_file_path
+       So we need to ignore since it suggest to put const */
+    // NOLINTNEXTLINE(runtime/references)
+    std::string& result_file_path) {
+  if (file_url.type != ada::scheme::FILE) {
+    env->isolate()->ThrowException(ERR_INVALID_URL_SCHEME(env->isolate()));
+
+    return false;
+  }
+
+  std::string_view pathname = file_url.get_pathname();
+#ifdef _WIN32
+  size_t first_percent = std::string::npos;
+  size_t pathname_size = pathname.size();
+  std::string pathname_escaped_slash;
+
+  for (size_t i = 0; i < pathname_size; i++) {
+    if (pathname[i] == '/') {
+      pathname_escaped_slash += '\\';
+    } else {
+      pathname_escaped_slash += pathname[i];
+    }
+
+    if (pathname[i] != '%') continue;
+
+    if (first_percent == std::string::npos) {
+      first_percent = i;
+    }
+
+    // just safe-guard against access the pathname
+    // outside the bounds
+    if ((i + 2) >= pathname_size) continue;
+
+    char third = pathname[i + 2] | 0x20;
+
+    bool is_slash = pathname[i + 1] == '2' && third == 102;
+    bool is_forward_slash = pathname[i + 1] == '5' && third == 99;
+
+    if (!is_slash && !is_forward_slash) continue;
+
+    env->isolate()->ThrowException(ERR_INVALID_FILE_URL_PATH(
+        env->isolate(),
+        "File URL path must not include encoded \\ or / characters"));
+
+    return false;
+  }
+
+  std::string_view hostname = file_url.get_hostname();
+  std::string decoded_pathname = ada::unicode::percent_decode(
+      std::string_view(pathname_escaped_slash), first_percent);
+
+  if (hostname.size() > 0) {
+    // If hostname is set, then we have a UNC path
+    // Pass the hostname through domainToUnicode just in case
+    // it is an IDN using punycode encoding. We do not need to worry
+    // about percent encoding because the URL parser will have
+    // already taken care of that for us. Note that this only
+    // causes IDNs with an appropriate `xn--` prefix to be decoded.
+    result_file_path =
+        "\\\\" + ada::unicode::to_unicode(hostname) + decoded_pathname;
+
+    return true;
+  }
+
+  char letter = decoded_pathname[1] | 0x20;
+  char sep = decoded_pathname[2];
+
+  // a..z A..Z
+  if (letter < 'a' || letter > 'z' || sep != ':') {
+    env->isolate()->ThrowException(ERR_INVALID_FILE_URL_PATH(
+        env->isolate(), "File URL path must be absolute"));
+
+    return false;
+  }
+
+  result_file_path = decoded_pathname.substr(1);
+
+  return true;
+#else   // _WIN32
+  std::string_view hostname = file_url.get_hostname();
+
+  if (hostname.size() > 0) {
+    std::string error_message =
+        std::string("File URL host must be \"localhost\" or empty on ") +
+        std::string(per_process::metadata.platform);
+    env->isolate()->ThrowException(
+        ERR_INVALID_FILE_URL_HOST(env->isolate(), error_message.c_str()));
+
+    return false;
+  }
+
+  size_t first_percent = std::string::npos;
+  for (size_t i = 0; (i + 2) < pathname.size(); i++) {
+    if (pathname[i] != '%') continue;
+
+    if (first_percent == std::string::npos) {
+      first_percent = i;
+    }
+
+    if (pathname[i + 1] == '2' && (pathname[i + 2] | 0x20) == 102) {
+      env->isolate()->ThrowException(ERR_INVALID_FILE_URL_PATH(
+          env->isolate(),
+          "File URL path must not include encoded / characters"));
+
+      return false;
+    }
+  }
+
+  result_file_path = ada::unicode::percent_decode(pathname, first_percent);
+
+  return true;
+#endif  // _WIN32
+}
+
+BindingData::FilePathIsFileReturnType BindingData::FilePathIsFile(
+    Environment* env, const std::string& file_path) {
+  THROW_IF_INSUFFICIENT_PERMISSIONS(
+      env,
+      permission::PermissionScope::kFileSystemRead,
+      file_path,
+      BindingData::FilePathIsFileReturnType::kThrowInsufficientPermissions);
+
+  uv_fs_t req;
+
+  int rc = uv_fs_stat(env->event_loop(), &req, file_path.c_str(), nullptr);
+
+  if (rc == 0) {
+    const uv_stat_t* const s = static_cast<const uv_stat_t*>(req.ptr);
+    rc = !!(s->st_mode & S_IFDIR);
+  }
+
+  uv_fs_req_cleanup(&req);
+
+  // rc is 0 if the path refers to a file
+  if (rc == 0) return BindingData::FilePathIsFileReturnType::kIsFile;
+
+  return BindingData::FilePathIsFileReturnType::kIsNotFile;
+}
+
+// the possible file extensions that should be tested
+// 0-6: when packageConfig.main is defined
+// 7-9: when packageConfig.main is NOT defined,
+//      or when the previous case didn't found the file
+const std::array<std::string, 10> BindingData::legacy_main_extensions = {
+    "",
+    ".js",
+    ".json",
+    ".node",
+    "/index.js",
+    "/index.json",
+    "/index.node",
+    ".js",
+    ".json",
+    ".node"};
+
+void BindingData::LegacyMainResolve(const FunctionCallbackInfo<Value>& args) {
+  CHECK_GE(args.Length(), 1);
+  CHECK(args[0]->IsString());
+
+  Environment* env = Environment::GetCurrent(args);
+
+  Utf8Value utf8_package_json_url(env->isolate(), args[0].As<String>());
+  auto package_json_url =
+      ada::parse<ada::url_aggregator>(utf8_package_json_url.ToStringView());
+
+  if (!package_json_url) {
+    env->isolate()->ThrowException(
+        ERR_INVALID_URL(env->isolate(), "Invalid URL"));
+
+    return;
+  }
+
+  ada::result<ada::url_aggregator> file_path_url;
+  std::string initial_file_path;
+  std::string file_path;
+
+  if (args.Length() >= 2 && !args[1]->IsNullOrUndefined() &&
+      args[1]->IsString()) {
+    std::string package_config_main =
+        Utf8Value(env->isolate(), args[1].As<String>()).ToString();
+
+    file_path_url = ada::parse<ada::url_aggregator>(
+        std::string("./") + package_config_main, &package_json_url.value());
+
+    if (!file_path_url) {
+      env->isolate()->ThrowException(
+          ERR_INVALID_URL(env->isolate(), "Invalid URL"));
+
+      return;
+    }
+
+    if (!FileURLToPath(env, file_path_url.value(), initial_file_path)) return;
+
+    FromNamespacedPath(&initial_file_path);
+
+    for (int i = 0; i < BindingData::legacy_main_extensions_with_main_end;
+         i++) {
+      file_path = initial_file_path + BindingData::legacy_main_extensions[i];
+
+      switch (FilePathIsFile(env, file_path)) {
+        case BindingData::FilePathIsFileReturnType::kIsFile:
+          return args.GetReturnValue().Set(i);
+        case BindingData::FilePathIsFileReturnType::kIsNotFile:
+          continue;
+        case BindingData::FilePathIsFileReturnType::
+            kThrowInsufficientPermissions:
+          // the default behavior when do not have permission is to return
+          // and exit the execution of the method as soon as possible
+          // the internal function will throw the exception
+          return;
+        default:
+          UNREACHABLE();
+      }
+    }
+  }
+
+  file_path_url =
+      ada::parse<ada::url_aggregator>("./index", &package_json_url.value());
+
+  if (!file_path_url) {
+    env->isolate()->ThrowException(
+        ERR_INVALID_URL(env->isolate(), "Invalid URL"));
+
+    return;
+  }
+
+  if (!FileURLToPath(env, file_path_url.value(), initial_file_path)) return;
+
+  FromNamespacedPath(&initial_file_path);
+
+  for (int i = BindingData::legacy_main_extensions_with_main_end;
+       i < BindingData::legacy_main_extensions_package_fallback_end;
+       i++) {
+    file_path = initial_file_path + BindingData::legacy_main_extensions[i];
+
+    switch (FilePathIsFile(env, file_path)) {
+      case BindingData::FilePathIsFileReturnType::kIsFile:
+        return args.GetReturnValue().Set(i);
+      case BindingData::FilePathIsFileReturnType::kIsNotFile:
+        continue;
+      case BindingData::FilePathIsFileReturnType::kThrowInsufficientPermissions:
+        // the default behavior when do not have permission is to return
+        // and exit the execution of the method as soon as possible
+        // the internal function will throw the exception
+        return;
+      default:
+        UNREACHABLE();
+    }
+  }
+
+  std::string module_path;
+  std::string module_base;
+
+  if (!FileURLToPath(env, package_json_url.value(), module_path)) return;
+
+  if (args.Length() >= 3 && !args[2]->IsNullOrUndefined() &&
+      args[2]->IsString()) {
+    Utf8Value utf8_base_path(env->isolate(), args[2].As<String>());
+    auto base_url =
+        ada::parse<ada::url_aggregator>(utf8_base_path.ToStringView());
+
+    if (!base_url) {
+      env->isolate()->ThrowException(
+          ERR_INVALID_URL(env->isolate(), "Invalid URL"));
+
+      return;
+    }
+
+    if (!FileURLToPath(env, base_url.value(), module_base)) return;
+  } else {
+    std::string err_arg_message =
+        "The \"base\" argument must be of type string or an instance of URL.";
+    env->isolate()->ThrowException(
+        ERR_INVALID_ARG_TYPE(env->isolate(), err_arg_message.c_str()));
+    return;
+  }
+
+  env->isolate()->ThrowException(
+      ERR_MODULE_NOT_FOUND(env->isolate(),
+                           "Cannot find package '%s' imported from %s",
+                           module_path,
+                           module_base));
+}
+
 void BindingData::MemoryInfo(MemoryTracker* tracker) const {
   tracker->TrackField("stats_field_array", stats_field_array);
   tracker->TrackField("stats_field_bigint_array", stats_field_bigint_array);
@@ -2715,186 +3064,221 @@ void BindingData::MemoryInfo(MemoryTracker* tracker) const {
                       file_handle_read_wrap_freelist);
 }
 
-BindingData::BindingData(Realm* realm, v8::Local<v8::Object> wrap)
+BindingData::BindingData(Realm* realm,
+                         v8::Local<v8::Object> wrap,
+                         InternalFieldInfo* info)
     : SnapshotableObject(realm, wrap, type_int),
-      stats_field_array(realm->isolate(), kFsStatsBufferLength),
-      stats_field_bigint_array(realm->isolate(), kFsStatsBufferLength),
-      statfs_field_array(realm->isolate(), kFsStatFsBufferLength),
-      statfs_field_bigint_array(realm->isolate(), kFsStatFsBufferLength) {
+      stats_field_array(realm->isolate(),
+                        kFsStatsBufferLength,
+                        MAYBE_FIELD_PTR(info, stats_field_array)),
+      stats_field_bigint_array(realm->isolate(),
+                               kFsStatsBufferLength,
+                               MAYBE_FIELD_PTR(info, stats_field_bigint_array)),
+      statfs_field_array(realm->isolate(),
+                         kFsStatFsBufferLength,
+                         MAYBE_FIELD_PTR(info, statfs_field_array)),
+      statfs_field_bigint_array(
+          realm->isolate(),
+          kFsStatFsBufferLength,
+          MAYBE_FIELD_PTR(info, statfs_field_bigint_array)) {
   Isolate* isolate = realm->isolate();
   Local<Context> context = realm->context();
-  wrap->Set(context,
-            FIXED_ONE_BYTE_STRING(isolate, "statValues"),
-            stats_field_array.GetJSArray())
-      .Check();
 
-  wrap->Set(context,
-            FIXED_ONE_BYTE_STRING(isolate, "bigintStatValues"),
-            stats_field_bigint_array.GetJSArray())
-      .Check();
+  if (info == nullptr) {
+    wrap->Set(context,
+              FIXED_ONE_BYTE_STRING(isolate, "statValues"),
+              stats_field_array.GetJSArray())
+        .Check();
 
-  wrap->Set(context,
-            FIXED_ONE_BYTE_STRING(isolate, "statFsValues"),
-            statfs_field_array.GetJSArray())
-      .Check();
+    wrap->Set(context,
+              FIXED_ONE_BYTE_STRING(isolate, "bigintStatValues"),
+              stats_field_bigint_array.GetJSArray())
+        .Check();
 
-  wrap->Set(context,
-            FIXED_ONE_BYTE_STRING(isolate, "bigintStatFsValues"),
-            statfs_field_bigint_array.GetJSArray())
-      .Check();
+    wrap->Set(context,
+              FIXED_ONE_BYTE_STRING(isolate, "statFsValues"),
+              statfs_field_array.GetJSArray())
+        .Check();
+
+    wrap->Set(context,
+              FIXED_ONE_BYTE_STRING(isolate, "bigintStatFsValues"),
+              statfs_field_bigint_array.GetJSArray())
+        .Check();
+  } else {
+    stats_field_array.Deserialize(realm->context());
+    stats_field_bigint_array.Deserialize(realm->context());
+    statfs_field_array.Deserialize(realm->context());
+    statfs_field_bigint_array.Deserialize(realm->context());
+  }
+  stats_field_array.MakeWeak();
+  stats_field_bigint_array.MakeWeak();
+  statfs_field_array.MakeWeak();
+  statfs_field_bigint_array.MakeWeak();
 }
 
 void BindingData::Deserialize(Local<Context> context,
                               Local<Object> holder,
                               int index,
                               InternalFieldInfoBase* info) {
-  DCHECK_EQ(index, BaseObject::kEmbedderType);
+  DCHECK_IS_SNAPSHOT_SLOT(index);
   HandleScope scope(context->GetIsolate());
   Realm* realm = Realm::GetCurrent(context);
-  BindingData* binding = realm->AddBindingData<BindingData>(context, holder);
+  InternalFieldInfo* casted_info = static_cast<InternalFieldInfo*>(info);
+  BindingData* binding =
+      realm->AddBindingData<BindingData>(holder, casted_info);
   CHECK_NOT_NULL(binding);
 }
 
 bool BindingData::PrepareForSerialization(Local<Context> context,
                                           v8::SnapshotCreator* creator) {
   CHECK(file_handle_read_wrap_freelist.empty());
-  // We'll just re-initialize the buffers in the constructor since their
-  // contents can be thrown away once consumed in the previous call.
-  stats_field_array.Release();
-  stats_field_bigint_array.Release();
-  statfs_field_array.Release();
-  statfs_field_bigint_array.Release();
+  DCHECK_NULL(internal_field_info_);
+  internal_field_info_ = InternalFieldInfoBase::New<InternalFieldInfo>(type());
+  internal_field_info_->stats_field_array =
+      stats_field_array.Serialize(context, creator);
+  internal_field_info_->stats_field_bigint_array =
+      stats_field_bigint_array.Serialize(context, creator);
+  internal_field_info_->statfs_field_array =
+      statfs_field_array.Serialize(context, creator);
+  internal_field_info_->statfs_field_bigint_array =
+      statfs_field_bigint_array.Serialize(context, creator);
   // Return true because we need to maintain the reference to the binding from
   // JS land.
   return true;
 }
 
 InternalFieldInfoBase* BindingData::Serialize(int index) {
-  DCHECK_EQ(index, BaseObject::kEmbedderType);
-  InternalFieldInfo* info =
-      InternalFieldInfoBase::New<InternalFieldInfo>(type());
+  DCHECK_IS_SNAPSHOT_SLOT(index);
+  InternalFieldInfo* info = internal_field_info_;
+  internal_field_info_ = nullptr;
   return info;
 }
 
-void Initialize(Local<Object> target,
-                Local<Value> unused,
-                Local<Context> context,
-                void* priv) {
-  Realm* realm = Realm::GetCurrent(context);
-  Environment* env = realm->env();
-  Isolate* isolate = env->isolate();
-  BindingData* const binding_data =
-      realm->AddBindingData<BindingData>(context, target);
-  if (binding_data == nullptr) return;
+void BindingData::CreatePerIsolateProperties(IsolateData* isolate_data,
+                                             Local<ObjectTemplate> target) {
+  Isolate* isolate = isolate_data->isolate();
 
-  SetMethod(context, target, "access", Access);
-  SetMethod(context, target, "close", Close);
-  SetMethod(context, target, "open", Open);
-  SetMethod(context, target, "openFileHandle", OpenFileHandle);
-  SetMethod(context, target, "read", Read);
-  SetMethod(context, target, "readBuffers", ReadBuffers);
-  SetMethod(context, target, "fdatasync", Fdatasync);
-  SetMethod(context, target, "fsync", Fsync);
-  SetMethod(context, target, "rename", Rename);
-  SetMethod(context, target, "ftruncate", FTruncate);
-  SetMethod(context, target, "rmdir", RMDir);
-  SetMethod(context, target, "mkdir", MKDir);
-  SetMethod(context, target, "readdir", ReadDir);
-  SetMethod(context, target, "internalModuleReadJSON", InternalModuleReadJSON);
-  SetMethod(context, target, "internalModuleStat", InternalModuleStat);
-  SetMethod(context, target, "stat", Stat);
-  SetMethod(context, target, "lstat", LStat);
-  SetMethod(context, target, "fstat", FStat);
-  SetMethod(context, target, "statfs", StatFs);
-  SetMethod(context, target, "link", Link);
-  SetMethod(context, target, "symlink", Symlink);
-  SetMethod(context, target, "readlink", ReadLink);
-  SetMethod(context, target, "unlink", Unlink);
-  SetMethod(context, target, "writeBuffer", WriteBuffer);
-  SetMethod(context, target, "writeBuffers", WriteBuffers);
-  SetMethod(context, target, "writeString", WriteString);
-  SetMethod(context, target, "realpath", RealPath);
-  SetMethod(context, target, "copyFile", CopyFile);
+  SetMethod(
+      isolate, target, "legacyMainResolve", BindingData::LegacyMainResolve);
+}
 
-  SetMethod(context, target, "chmod", Chmod);
-  SetMethod(context, target, "fchmod", FChmod);
+void BindingData::RegisterExternalReferences(
+    ExternalReferenceRegistry* registry) {
+  registry->Register(BindingData::LegacyMainResolve);
+}
 
-  SetMethod(context, target, "chown", Chown);
-  SetMethod(context, target, "fchown", FChown);
-  SetMethod(context, target, "lchown", LChown);
+static void CreatePerIsolateProperties(IsolateData* isolate_data,
+                                       Local<ObjectTemplate> target) {
+  Isolate* isolate = isolate_data->isolate();
 
-  SetMethod(context, target, "utimes", UTimes);
-  SetMethod(context, target, "futimes", FUTimes);
-  SetMethod(context, target, "lutimes", LUTimes);
+  SetMethod(isolate, target, "access", Access);
+  SetMethod(isolate, target, "close", Close);
+  SetMethod(isolate, target, "open", Open);
+  SetMethod(isolate, target, "openFileHandle", OpenFileHandle);
+  SetMethod(isolate, target, "read", Read);
+  SetMethod(isolate, target, "readBuffers", ReadBuffers);
+  SetMethod(isolate, target, "fdatasync", Fdatasync);
+  SetMethod(isolate, target, "fsync", Fsync);
+  SetMethod(isolate, target, "rename", Rename);
+  SetMethod(isolate, target, "ftruncate", FTruncate);
+  SetMethod(isolate, target, "rmdir", RMDir);
+  SetMethod(isolate, target, "mkdir", MKDir);
+  SetMethod(isolate, target, "readdir", ReadDir);
+  SetMethod(isolate, target, "internalModuleReadJSON", InternalModuleReadJSON);
+  SetMethod(isolate, target, "internalModuleStat", InternalModuleStat);
+  SetMethod(isolate, target, "stat", Stat);
+  SetMethod(isolate, target, "lstat", LStat);
+  SetMethod(isolate, target, "fstat", FStat);
+  SetMethodNoSideEffect(isolate, target, "readFileSync", ReadFileSync);
+  SetMethod(isolate, target, "statfs", StatFs);
+  SetMethod(isolate, target, "link", Link);
+  SetMethod(isolate, target, "symlink", Symlink);
+  SetMethod(isolate, target, "readlink", ReadLink);
+  SetMethod(isolate, target, "unlink", Unlink);
+  SetMethod(isolate, target, "writeBuffer", WriteBuffer);
+  SetMethod(isolate, target, "writeBuffers", WriteBuffers);
+  SetMethod(isolate, target, "writeString", WriteString);
+  SetMethod(isolate, target, "realpath", RealPath);
+  SetMethod(isolate, target, "copyFile", CopyFile);
 
-  SetMethod(context, target, "mkdtemp", Mkdtemp);
+  SetMethod(isolate, target, "chmod", Chmod);
+  SetMethod(isolate, target, "fchmod", FChmod);
 
-  target
-      ->Set(context,
-            FIXED_ONE_BYTE_STRING(isolate, "kFsStatsFieldsNumber"),
-            Integer::New(
-                isolate,
-                static_cast<int32_t>(FsStatsOffset::kFsStatsFieldsNumber)))
-      .Check();
+  SetMethod(isolate, target, "chown", Chown);
+  SetMethod(isolate, target, "fchown", FChown);
+  SetMethod(isolate, target, "lchown", LChown);
 
-  StatWatcher::Initialize(env, target);
+  SetMethod(isolate, target, "utimes", UTimes);
+  SetMethod(isolate, target, "futimes", FUTimes);
+  SetMethod(isolate, target, "lutimes", LUTimes);
+
+  SetMethod(isolate, target, "mkdtemp", Mkdtemp);
+
+  StatWatcher::CreatePerIsolateProperties(isolate_data, target);
+  BindingData::CreatePerIsolateProperties(isolate_data, target);
+
+  target->Set(
+      FIXED_ONE_BYTE_STRING(isolate, "kFsStatsFieldsNumber"),
+      Integer::New(isolate,
+                   static_cast<int32_t>(FsStatsOffset::kFsStatsFieldsNumber)));
 
   // Create FunctionTemplate for FSReqCallback
   Local<FunctionTemplate> fst = NewFunctionTemplate(isolate, NewFSReqCallback);
   fst->InstanceTemplate()->SetInternalFieldCount(
       FSReqBase::kInternalFieldCount);
-  fst->Inherit(AsyncWrap::GetConstructorTemplate(env));
-  SetConstructorFunction(context, target, "FSReqCallback", fst);
+  fst->Inherit(AsyncWrap::GetConstructorTemplate(isolate_data));
+  SetConstructorFunction(isolate, target, "FSReqCallback", fst);
 
   // Create FunctionTemplate for FileHandleReadWrap. There’s no need
   // to do anything in the constructor, so we only store the instance template.
   Local<FunctionTemplate> fh_rw = FunctionTemplate::New(isolate);
   fh_rw->InstanceTemplate()->SetInternalFieldCount(
       FSReqBase::kInternalFieldCount);
-  fh_rw->Inherit(AsyncWrap::GetConstructorTemplate(env));
+  fh_rw->Inherit(AsyncWrap::GetConstructorTemplate(isolate_data));
   Local<String> fhWrapString =
       FIXED_ONE_BYTE_STRING(isolate, "FileHandleReqWrap");
   fh_rw->SetClassName(fhWrapString);
-  env->set_filehandlereadwrap_template(
-      fst->InstanceTemplate());
+  isolate_data->set_filehandlereadwrap_template(fst->InstanceTemplate());
 
   // Create Function Template for FSReqPromise
   Local<FunctionTemplate> fpt = FunctionTemplate::New(isolate);
-  fpt->Inherit(AsyncWrap::GetConstructorTemplate(env));
+  fpt->Inherit(AsyncWrap::GetConstructorTemplate(isolate_data));
   Local<String> promiseString =
       FIXED_ONE_BYTE_STRING(isolate, "FSReqPromise");
   fpt->SetClassName(promiseString);
   Local<ObjectTemplate> fpo = fpt->InstanceTemplate();
   fpo->SetInternalFieldCount(FSReqBase::kInternalFieldCount);
-  env->set_fsreqpromise_constructor_template(fpo);
+  isolate_data->set_fsreqpromise_constructor_template(fpo);
 
   // Create FunctionTemplate for FileHandle
   Local<FunctionTemplate> fd = NewFunctionTemplate(isolate, FileHandle::New);
-  fd->Inherit(AsyncWrap::GetConstructorTemplate(env));
+  fd->Inherit(AsyncWrap::GetConstructorTemplate(isolate_data));
   SetProtoMethod(isolate, fd, "close", FileHandle::Close);
   SetProtoMethod(isolate, fd, "releaseFD", FileHandle::ReleaseFD);
   Local<ObjectTemplate> fdt = fd->InstanceTemplate();
   fdt->SetInternalFieldCount(FileHandle::kInternalFieldCount);
-  StreamBase::AddMethods(env, fd);
-  SetConstructorFunction(context, target, "FileHandle", fd);
-  env->set_fd_constructor_template(fdt);
+  StreamBase::AddMethods(isolate_data, fd);
+  SetConstructorFunction(isolate, target, "FileHandle", fd);
+  isolate_data->set_fd_constructor_template(fdt);
 
   // Create FunctionTemplate for FileHandle::CloseReq
   Local<FunctionTemplate> fdclose = FunctionTemplate::New(isolate);
   fdclose->SetClassName(FIXED_ONE_BYTE_STRING(isolate,
                         "FileHandleCloseReq"));
-  fdclose->Inherit(AsyncWrap::GetConstructorTemplate(env));
+  fdclose->Inherit(AsyncWrap::GetConstructorTemplate(isolate_data));
   Local<ObjectTemplate> fdcloset = fdclose->InstanceTemplate();
   fdcloset->SetInternalFieldCount(FSReqBase::kInternalFieldCount);
-  env->set_fdclose_constructor_template(fdcloset);
+  isolate_data->set_fdclose_constructor_template(fdcloset);
 
-  Local<Symbol> use_promises_symbol =
-    Symbol::New(isolate,
-                FIXED_ONE_BYTE_STRING(isolate, "use promises"));
-  env->set_fs_use_promises_symbol(use_promises_symbol);
-  target->Set(context,
-              FIXED_ONE_BYTE_STRING(isolate, "kUsePromises"),
-              use_promises_symbol).Check();
+  target->Set(isolate, "kUsePromises", isolate_data->fs_use_promises_symbol());
+}
+
+static void CreatePerContextProperties(Local<Object> target,
+                                       Local<Value> unused,
+                                       Local<Context> context,
+                                       void* priv) {
+  Realm* realm = Realm::GetCurrent(context);
+  realm->AddBindingData<BindingData>(target);
 }
 
 BindingData* FSReqBase::binding_data() {
@@ -2904,6 +3288,7 @@ BindingData* FSReqBase::binding_data() {
 void RegisterExternalReferences(ExternalReferenceRegistry* registry) {
   registry->Register(Access);
   StatWatcher::RegisterExternalReferences(registry);
+  BindingData::RegisterExternalReferences(registry);
 
   registry->Register(Close);
   registry->Register(Open);
@@ -2922,6 +3307,7 @@ void RegisterExternalReferences(ExternalReferenceRegistry* registry) {
   registry->Register(Stat);
   registry->Register(LStat);
   registry->Register(FStat);
+  registry->Register(ReadFileSync);
   registry->Register(StatFs);
   registry->Register(Link);
   registry->Register(Symlink);
@@ -2957,5 +3343,6 @@ void RegisterExternalReferences(ExternalReferenceRegistry* registry) {
 
 }  // end namespace node
 
-NODE_BINDING_CONTEXT_AWARE_INTERNAL(fs, node::fs::Initialize)
+NODE_BINDING_CONTEXT_AWARE_INTERNAL(fs, node::fs::CreatePerContextProperties)
+NODE_BINDING_PER_ISOLATE_INIT(fs, node::fs::CreatePerIsolateProperties)
 NODE_BINDING_EXTERNAL_REFERENCE(fs, node::fs::RegisterExternalReferences)

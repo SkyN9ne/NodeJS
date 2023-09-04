@@ -872,6 +872,9 @@ The [`require.extensions`][] property is deprecated.
 
 <!-- YAML
 changes:
+  - version: REPLACEME
+    pr-url: https://github.com/nodejs/node/pull/47202
+    description: Runtime deprecation.
   - version: v16.6.0
     pr-url: https://github.com/nodejs/node/pull/38444
     description: Added support for `--pending-deprecation`.
@@ -880,7 +883,7 @@ changes:
     description: Documentation-only deprecation.
 -->
 
-Type: Documentation-only (supports [`--pending-deprecation`][])
+Type: Runtime
 
 The [`punycode`][] module is deprecated. Please use a userland alternative
 instead.
@@ -1864,14 +1867,18 @@ bits are allowed. Authentication tags of other lengths are invalid per
 
 <!-- YAML
 changes:
+  - version: v20.0.0
+    pr-url: https://github.com/nodejs/node/pull/47182
+    description: End-of-Life.
   - version: v10.0.0
     pr-url: https://github.com/nodejs/node/pull/18333
     description: Runtime deprecation.
 -->
 
-Type: Runtime
+Type: End-of-Life
 
-The [`crypto.DEFAULT_ENCODING`][] property is deprecated.
+The `crypto.DEFAULT_ENCODING` property only existed for compatibility with
+Node.js releases prior to versions 0.9.3 and has been removed.
 
 ### DEP0092: Top-level `this` bound to `module.exports`
 
@@ -2207,6 +2214,9 @@ changes:
 Type: Documentation-only (supports [`--pending-deprecation`][])
 
 `process.binding()` is for use by Node.js internal code only.
+
+While `process.binding()` has not reached End-of-Life status in general, it is
+unavailable when [policies][] or the [permission model][] are enabled.
 
 ### DEP0112: `dgram` private APIs
 
@@ -2975,7 +2985,7 @@ option, or a non-nullish non-boolean value for `verbatim` option in
 
 <!-- YAML
 changes:
-  - version: REPLACEME
+  - version: v20.0.0
     pr-url: https://github.com/nodejs/node/pull/45653
     description: Runtime deprecation.
   - version: v16.10.0
@@ -3183,7 +3193,7 @@ thing instead.
 
 <!-- YAML
 changes:
-  - version: REPLACEME
+  - version: v20.0.0
     pr-url: https://github.com/nodejs/node/pull/43716
     description: End-of-Life.
   - version: v19.0.0
@@ -3289,13 +3299,18 @@ Node-API callbacks.
 <!-- YAML
 changes:
   - version:
+      - v19.9.0
+      - v18.17.0
+    pr-url: https://github.com/nodejs/node/pull/47203
+    description: Added support for `--pending-deprecation`.
+  - version:
       - v19.0.0
       - v18.13.0
     pr-url: https://github.com/nodejs/node/pull/44919
     description: Documentation-only deprecation.
 -->
 
-Type: Documentation-only
+Type: Documentation-only (supports [`--pending-deprecation`][])
 
 [`url.parse()`][] behavior is not standardized and prone to errors that
 have security implications. Use the [WHATWG URL API][] instead. CVEs are not
@@ -3306,7 +3321,7 @@ issued for `url.parse()` vulnerabilities.
 <!-- YAML
 changes:
   - version:
-    - REPLACEME
+    - v20.0.0
     pr-url: https://github.com/nodejs/node/pull/45526
     description: Runtime deprecation.
   - version:
@@ -3343,7 +3358,7 @@ In a future version of Node.js, [`message.headers`][],
 
 <!-- YAML
 changes:
-  - version: REPLACEME
+  - version: v20.0.0
     pr-url: https://github.com/nodejs/node/pull/46432
     description: Runtime-deprecation.
 -->
@@ -3352,6 +3367,21 @@ Type: Runtime
 
 In a future version of Node.js, the `asyncResource` property will no longer
 be added when a function is bound to an `AsyncResource`.
+
+### DEP0173: the `assert.CallTracker` class
+
+<!-- YAML
+changes:
+  - version: v20.1.0
+    pr-url: https://github.com/nodejs/node/pull/47740
+    description: Documentation-only deprecation.
+-->
+
+Type: Documentation-only
+
+In a future version of Node.js, [`assert.CallTracker`][],
+will be removed.
+Consider using alternatives such as the [`mock`][] helper function.
 
 [NIST SP 800-38D]: https://nvlpubs.nist.gov/nistpubs/Legacy/SP/nistspecialpublication800-38d.pdf
 [RFC 6066]: https://tools.ietf.org/html/rfc6066#section-3
@@ -3376,6 +3406,7 @@ be added when a function is bound to an `AsyncResource`.
 [`Server.listen({fd: <number>})`]: net.md#serverlistenhandle-backlog-callback
 [`SlowBuffer`]: buffer.md#class-slowbuffer
 [`WriteStream.open()`]: fs.md#class-fswritestream
+[`assert.CallTracker`]: assert.md#class-assertcalltracker
 [`assert`]: assert.md
 [`asyncResource.runInAsyncScope()`]: async_context.md#asyncresourceruninasyncscopefn-thisarg-args
 [`buffer.subarray`]: buffer.md#bufsubarraystart-end
@@ -3385,7 +3416,6 @@ be added when a function is bound to an `AsyncResource`.
 [`console.error()`]: console.md#consoleerrordata-args
 [`console.log()`]: console.md#consolelogdata-args
 [`crypto.Certificate()` constructor]: crypto.md#legacy-api
-[`crypto.DEFAULT_ENCODING`]: crypto.md#cryptodefault_encoding
 [`crypto.createCipher()`]: crypto.md#cryptocreatecipheralgorithm-password-options
 [`crypto.createCipheriv()`]: crypto.md#cryptocreatecipherivalgorithm-key-iv-options
 [`crypto.createDecipher()`]: crypto.md#cryptocreatedecipheralgorithm-password-options
@@ -3434,6 +3464,7 @@ be added when a function is bound to an `AsyncResource`.
 [`message.socket`]: http.md#messagesocket
 [`message.trailersDistinct`]: http.md#messagetrailersdistinct
 [`message.trailers`]: http.md#messagetrailers
+[`mock`]: test.md#mocking
 [`module.createRequire()`]: module.md#modulecreaterequirefilename
 [`os.networkInterfaces()`]: os.md#osnetworkinterfaces
 [`os.tmpdir()`]: os.md#ostmpdir
@@ -3504,6 +3535,8 @@ be added when a function is bound to an `AsyncResource`.
 [from_string_encoding]: buffer.md#static-method-bufferfromstring-encoding
 [legacy URL API]: url.md#legacy-url-api
 [legacy `urlObject`]: url.md#legacy-urlobject
+[permission model]: permissions.md#permission-model
+[policies]: permissions.md#policies
 [static methods of `crypto.Certificate()`]: crypto.md#class-certificate
 [subpath exports]: packages.md#subpath-exports
 [subpath imports]: packages.md#subpath-imports

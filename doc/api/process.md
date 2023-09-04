@@ -871,7 +871,7 @@ added: v0.5.0
 
 The operating system CPU architecture for which the Node.js binary was compiled.
 Possible values are: `'arm'`, `'arm64'`, `'ia32'`, `'mips'`,`'mipsel'`, `'ppc'`,
-`'ppc64'`, `'s390'`, `'s390x'`, and `'x64'`.
+`'ppc64'`, `'riscv64'`, `'s390'`, `'s390x'`, and `'x64'`.
 
 ```mjs
 import { arch } from 'node:process';
@@ -922,8 +922,8 @@ argv.forEach((val, index) => {
 
 Launching the Node.js process as:
 
-```console
-$ node process-args.js one two=three four
+```bash
+node process-args.js one two=three four
 ```
 
 Would generate the output:
@@ -1577,8 +1577,8 @@ reflected outside the Node.js process, or (unless explicitly requested)
 to other [`Worker`][] threads.
 In other words, the following example would not work:
 
-```console
-$ node -e 'process.env.foo = "bar"' && echo $foo
+```bash
+node -e 'process.env.foo = "bar"' && echo $foo
 ```
 
 While the following will:
@@ -1666,7 +1666,9 @@ each [`Worker`][] thread has its own copy of `process.env`, based on its
 parent thread's `process.env`, or whatever was specified as the `env` option
 to the [`Worker`][] constructor. Changes to `process.env` will not be visible
 across [`Worker`][] threads, and only the main thread can make changes that
-are visible to the operating system or to native add-ons.
+are visible to the operating system or to native add-ons. On Windows, a copy of
+`process.env` on a [`Worker`][] instance operates in a case-sensitive manner
+unlike the main thread.
 
 ## `process.execArgv`
 
@@ -1683,8 +1685,8 @@ include the Node.js executable, the name of the script, or any options following
 the script name. These options are useful in order to spawn child processes with
 the same execution environment as the parent.
 
-```console
-$ node --harmony script.js --version
+```bash
+node --harmony script.js --version
 ```
 
 Results in `process.execArgv`:
@@ -1728,7 +1730,7 @@ that started the Node.js process. Symbolic links, if any, are resolved.
 <!-- YAML
 added: v0.1.13
 changes:
-  - version: REPLACEME
+  - version: v20.0.0
     pr-url: https://github.com/nodejs/node/pull/43716
     description: Only accepts a code of type number, or of type string if it
                  represents an integer.
@@ -1836,7 +1838,7 @@ than the current process.
 <!-- YAML
 added: v0.11.8
 changes:
-  - version: REPLACEME
+  - version: v20.0.0
     pr-url: https://github.com/nodejs/node/pull/43716
     description: Only accepts a code of type number, or of type string if it
                  represents an integer.
@@ -2375,7 +2377,7 @@ console.log(memoryUsage.rss());
 ```
 
 ```cjs
-const { rss } = require('node:process');
+const { memoryUsage } = require('node:process');
 
 console.log(memoryUsage.rss());
 // 35655680
@@ -2623,7 +2625,7 @@ flag's behavior.
 ## `process.permission`
 
 <!-- YAML
-added: REPLACEME
+added: v20.0.0
 -->
 
 * {Object}
@@ -2634,41 +2636,13 @@ This API is available through the [`--experimental-permission`][] flag.
 for the current process. Additional documentation is available in the
 [Permission Model][].
 
-### `process.permission.deny(scope[, reference])`
-
-<!-- YAML
-added: REPLACEME
--->
-
-* `scopes` {string}
-* `reference` {Array}
-* Returns: {boolean}
-
-Deny permissions at runtime.
-
-The available scopes are:
-
-* `fs` - All File System
-* `fs.read` - File System read operations
-* `fs.write` - File System write operations
-
-The reference has a meaning based on the provided scope. For example,
-the reference when the scope is File System means files and folders.
-
-```js
-// Deny READ operations to the ./README.md file
-process.permission.deny('fs.read', ['./README.md']);
-// Deny ALL WRITE operations
-process.permission.deny('fs.write');
-```
-
 ### `process.permission.has(scope[, reference])`
 
 <!-- YAML
-added: REPLACEME
+added: v20.0.0
 -->
 
-* `scopes` {string}
+* `scope` {string}
 * `reference` {string}
 * Returns: {boolean}
 
@@ -2685,6 +2659,8 @@ The available scopes are:
 * `fs` - All File System
 * `fs.read` - File System read operations
 * `fs.write` - File System write operations
+* `child` - Child process spawning operations
+* `worker` - Worker thread spawning operation
 
 ```js
 // Check if the process has permission to read the README file
@@ -2960,6 +2936,7 @@ present.
 
 ```mjs
 import { report } from 'node:process';
+import util from 'node:util';
 
 const data = report.getReport();
 console.log(data.header.nodejsVersion);
@@ -2971,6 +2948,7 @@ fs.writeFileSync('my-report.log', util.inspect(data), 'utf8');
 
 ```cjs
 const { report } = require('node:process');
+const util = require('node:util');
 
 const data = report.getReport();
 console.log(data.header.nodejsVersion);
@@ -3539,6 +3517,19 @@ throw an error.
 Using this function is mutually exclusive with using the deprecated
 [`domain`][] built-in module.
 
+## `process.sourceMapsEnabled`
+
+<!-- YAML
+added: REPLACEME
+-->
+
+> Stability: 1 - Experimental
+
+* {boolean}
+
+The `process.sourceMapsEnabled` property returns whether the
+[Source Map v3][Source Map] support for stack traces is enabled.
+
 ## `process.stderr`
 
 * {Stream}
@@ -3867,21 +3858,30 @@ console.log(versions);
 Will generate an object similar to:
 
 ```console
-{ node: '11.13.0',
-  v8: '7.0.276.38-node.18',
-  uv: '1.27.0',
-  zlib: '1.2.11',
-  brotli: '1.0.7',
-  ares: '1.15.0',
-  modules: '67',
-  nghttp2: '1.34.0',
-  napi: '4',
-  llhttp: '1.1.1',
-  openssl: '1.1.1b',
-  cldr: '34.0',
-  icu: '63.1',
-  tz: '2018e',
-  unicode: '11.0' }
+{ node: '20.2.0',
+  acorn: '8.8.2',
+  ada: '2.4.0',
+  ares: '1.19.0',
+  base64: '0.5.0',
+  brotli: '1.0.9',
+  cjs_module_lexer: '1.2.2',
+  cldr: '43.0',
+  icu: '73.1',
+  llhttp: '8.1.0',
+  modules: '115',
+  napi: '8',
+  nghttp2: '1.52.0',
+  nghttp3: '0.7.0',
+  ngtcp2: '0.8.1',
+  openssl: '3.0.8+quic',
+  simdutf: '3.2.9',
+  tz: '2023c',
+  undici: '5.22.0',
+  unicode: '15.0',
+  uv: '1.44.2',
+  uvwasi: '0.0.16',
+  v8: '11.3.244.8-node.9',
+  zlib: '1.2.13' }
 ```
 
 ## Exit codes

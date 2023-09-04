@@ -1,5 +1,6 @@
 #include "fs_permission.h"
 #include "base_object-inl.h"
+#include "debug_utils-inl.h"
 #include "util.h"
 #include "v8.h"
 
@@ -9,6 +10,7 @@
 #include <algorithm>
 #include <filesystem>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace {
@@ -48,8 +50,7 @@ void FreeRecursivelyNode(
   delete node;
 }
 
-bool is_tree_granted(node::permission::FSPermission::RadixTree* deny_tree,
-                     node::permission::FSPermission::RadixTree* granted_tree,
+bool is_tree_granted(node::permission::FSPermission::RadixTree* granted_tree,
                      const std::string_view& param) {
 #ifdef _WIN32
   // is UNC file path
@@ -60,11 +61,51 @@ bool is_tree_granted(node::permission::FSPermission::RadixTree* deny_tree,
       starting_pos += 4;  // "UNC\"
     }
     auto normalized = param.substr(starting_pos);
-    return !deny_tree->Lookup(normalized) &&
-           granted_tree->Lookup(normalized, true);
+    return granted_tree->Lookup(normalized, true);
   }
 #endif
-  return !deny_tree->Lookup(param) && granted_tree->Lookup(param, true);
+  return granted_tree->Lookup(param, true);
+}
+
+void PrintTree(const node::permission::FSPermission::RadixTree::Node* node,
+               size_t spaces = 0) {
+  std::string whitespace(spaces, ' ');
+
+  if (node == nullptr) {
+    return;
+  }
+  if (node->wildcard_child != nullptr) {
+    node::per_process::Debug(node::DebugCategory::PERMISSION_MODEL,
+                             "%s Wildcard: %s\n",
+                             whitespace,
+                             node->prefix);
+  } else {
+    node::per_process::Debug(node::DebugCategory::PERMISSION_MODEL,
+                             "%s Prefix: %s\n",
+                             whitespace,
+                             node->prefix);
+    if (node->children.size()) {
+      size_t child = 0;
+      for (const auto& pair : node->children) {
+        ++child;
+        node::per_process::Debug(node::DebugCategory::PERMISSION_MODEL,
+                                 "%s Child(%s): %s\n",
+                                 whitespace,
+                                 child,
+                                 std::string(1, pair.first));
+        PrintTree(pair.second, spaces + 2);
+      }
+      node::per_process::Debug(node::DebugCategory::PERMISSION_MODEL,
+                               "%s End of tree - child(%s)\n",
+                               whitespace,
+                               child);
+    } else {
+      node::per_process::Debug(node::DebugCategory::PERMISSION_MODEL,
+                               "%s End of tree: %s\n",
+                               whitespace,
+                               node->prefix);
+    }
+  }
 }
 
 }  // namespace
@@ -75,9 +116,12 @@ namespace permission {
 
 // allow = '*'
 // allow = '/tmp/,/home/example.js'
-void FSPermission::Apply(const std::string& allow, PermissionScope scope) {
-  for (const auto& res : SplitString(allow, ',')) {
-    if (res == "*") {
+void FSPermission::Apply(const std::vector<std::string>& allow,
+                         PermissionScope scope) {
+  using std::string_view_literals::operator""sv;
+
+  for (const std::string_view res : allow) {
+    if (res == "*"sv) {
       if (scope == PermissionScope::kFileSystemRead) {
         deny_all_in_ = false;
         allow_all_in_ = true;
@@ -87,45 +131,11 @@ void FSPermission::Apply(const std::string& allow, PermissionScope scope) {
       }
       return;
     }
-    GrantAccess(scope, res);
+    GrantAccess(scope, std::string(res.data(), res.size()));
   }
 }
 
-bool FSPermission::Deny(PermissionScope perm,
-                        const std::vector<std::string>& params) {
-  if (perm == PermissionScope::kFileSystem) {
-    deny_all_in_ = true;
-    deny_all_out_ = true;
-    return true;
-  }
-
-  bool deny_all = params.size() == 0;
-  if (perm == PermissionScope::kFileSystemRead) {
-    if (deny_all) deny_all_in_ = true;
-    // when deny_all_in is already true permission.deny should be idempotent
-    if (deny_all_in_) return true;
-    allow_all_in_ = false;
-    for (auto& param : params) {
-      deny_in_fs_.Insert(WildcardIfDir(param));
-    }
-    return true;
-  }
-
-  if (perm == PermissionScope::kFileSystemWrite) {
-    if (deny_all) deny_all_out_ = true;
-    // when deny_all_out is already true permission.deny should be idempotent
-    if (deny_all_out_) return true;
-    allow_all_out_ = false;
-
-    for (auto& param : params) {
-      deny_out_fs_.Insert(WildcardIfDir(param));
-    }
-    return true;
-  }
-  return false;
-}
-
-void FSPermission::GrantAccess(PermissionScope perm, std::string res) {
+void FSPermission::GrantAccess(PermissionScope perm, const std::string& res) {
   const std::string path = WildcardIfDir(res);
   if (perm == PermissionScope::kFileSystemRead) {
     granted_in_fs_.Insert(path);
@@ -144,11 +154,11 @@ bool FSPermission::is_granted(PermissionScope perm,
     case PermissionScope::kFileSystemRead:
       return !deny_all_in_ &&
              ((param.empty() && allow_all_in_) || allow_all_in_ ||
-              is_tree_granted(&deny_in_fs_, &granted_in_fs_, param));
+              is_tree_granted(&granted_in_fs_, param));
     case PermissionScope::kFileSystemWrite:
       return !deny_all_out_ &&
              ((param.empty() && allow_all_out_) || allow_all_out_ ||
-              is_tree_granted(&deny_out_fs_, &granted_out_fs_, param));
+              is_tree_granted(&granted_out_fs_, param));
     default:
       return false;
   }
@@ -166,7 +176,6 @@ bool FSPermission::RadixTree::Lookup(const std::string_view& s,
   if (current_node->children.size() == 0) {
     return when_empty_return;
   }
-
   unsigned int parent_node_prefix_len = current_node->prefix.length();
   const std::string path(s);
   auto path_len = path.length();
@@ -209,6 +218,12 @@ void FSPermission::RadixTree::Insert(const std::string& path) {
       current_node = current_node->CreateWildcardChild();
       parent_node_prefix_len = i;
     }
+  }
+
+  if (UNLIKELY(per_process::enabled_debug_list.enabled(
+          DebugCategory::PERMISSION_MODEL))) {
+    per_process::Debug(DebugCategory::PERMISSION_MODEL, "Inserting %s\n", path);
+    PrintTree(root_node_);
   }
 }
 

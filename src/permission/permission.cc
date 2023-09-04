@@ -14,10 +14,8 @@
 
 namespace node {
 
-using v8::Array;
 using v8::Context;
 using v8::FunctionCallbackInfo;
-using v8::Integer;
 using v8::Local;
 using v8::Object;
 using v8::String;
@@ -26,42 +24,6 @@ using v8::Value;
 namespace permission {
 
 namespace {
-
-// permission.deny('fs.read', ['/tmp/'])
-// permission.deny('fs.read')
-static void Deny(const FunctionCallbackInfo<Value>& args) {
-  Environment* env = Environment::GetCurrent(args);
-  v8::Isolate* isolate = env->isolate();
-  CHECK(args[0]->IsString());
-  std::string deny_scope = *String::Utf8Value(isolate, args[0]);
-  PermissionScope scope = Permission::StringToPermission(deny_scope);
-  if (scope == PermissionScope::kPermissionsRoot) {
-    return args.GetReturnValue().Set(false);
-  }
-
-  std::vector<std::string> params;
-  if (args.Length() == 1 || args[1]->IsUndefined()) {
-    return args.GetReturnValue().Set(env->permission()->Deny(scope, params));
-  }
-
-  CHECK(args[1]->IsArray());
-  Local<Array> js_params = Local<Array>::Cast(args[1]);
-  Local<Context> context = isolate->GetCurrentContext();
-
-  for (uint32_t i = 0; i < js_params->Length(); ++i) {
-    Local<Value> arg;
-    if (!js_params->Get(context, Integer::New(isolate, i)).ToLocal(&arg)) {
-      return;
-    }
-    String::Utf8Value utf8_arg(isolate, arg);
-    if (*utf8_arg == nullptr) {
-      return;
-    }
-    params.push_back(*utf8_arg);
-  }
-
-  return args.GetReturnValue().Set(env->permission()->Deny(scope, params));
-}
 
 // permission.has('fs.in', '/tmp/')
 // permission.has('fs.in')
@@ -117,6 +79,8 @@ Permission::Permission() : enabled_(false) {
       std::make_shared<ChildProcessPermission>();
   std::shared_ptr<PermissionBase> worker_t =
       std::make_shared<WorkerPermission>();
+  std::shared_ptr<PermissionBase> inspector =
+      std::make_shared<InspectorPermission>();
 #define V(Name, _, __)                                                         \
   nodes_.insert(std::make_pair(PermissionScope::k##Name, fs));
   FILESYSTEM_PERMISSIONS(V)
@@ -128,6 +92,10 @@ Permission::Permission() : enabled_(false) {
 #define V(Name, _, __)                                                         \
   nodes_.insert(std::make_pair(PermissionScope::k##Name, worker_t));
   WORKER_THREADS_PERMISSIONS(V)
+#undef V
+#define V(Name, _, __)                                                         \
+  nodes_.insert(std::make_pair(PermissionScope::k##Name, inspector));
+  INSPECTOR_PERMISSIONS(V)
 #undef V
 }
 
@@ -162,34 +130,24 @@ void Permission::EnablePermissions() {
   }
 }
 
-void Permission::Apply(const std::string& allow, PermissionScope scope) {
+void Permission::Apply(const std::vector<std::string>& allow,
+                       PermissionScope scope) {
   auto permission = nodes_.find(scope);
   if (permission != nodes_.end()) {
     permission->second->Apply(allow, scope);
   }
 }
 
-bool Permission::Deny(PermissionScope scope,
-                      const std::vector<std::string>& params) {
-  auto permission = nodes_.find(scope);
-  if (permission != nodes_.end()) {
-    return permission->second->Deny(scope, params);
-  }
-  return false;
-}
-
 void Initialize(Local<Object> target,
                 Local<Value> unused,
                 Local<Context> context,
                 void* priv) {
-  SetMethod(context, target, "deny", Deny);
   SetMethodNoSideEffect(context, target, "has", Has);
 
   target->SetIntegrityLevel(context, v8::IntegrityLevel::kFrozen).FromJust();
 }
 
 void RegisterExternalReferences(ExternalReferenceRegistry* registry) {
-  registry->Register(Deny);
   registry->Register(Has);
 }
 

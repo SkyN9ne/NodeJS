@@ -51,7 +51,7 @@ added: v0.5.0
 
 Returns the operating system CPU architecture for which the Node.js binary was
 compiled. Possible values are `'arm'`, `'arm64'`, `'ia32'`, `'mips'`,
-`'mipsel'`, `'ppc'`, `'ppc64'`, `'s390'`, `'s390x'`, and `'x64'`.
+`'mipsel'`, `'ppc'`, `'ppc64'`, `'riscv64'`, `'s390'`, `'s390x'`, and `'x64'`.
 
 The return value is equivalent to [`process.arch`][].
 
@@ -76,6 +76,8 @@ added: v0.3.3
 * Returns: {Object\[]}
 
 Returns an array of objects containing information about each logical CPU core.
+The array will be empty if no CPU information is available, such as if the
+`/proc` file system is unavailable.
 
 The properties included on each object include:
 

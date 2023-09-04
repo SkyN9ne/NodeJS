@@ -278,7 +278,7 @@ run().catch(console.error);
 rs.resume(); // Drain the stream.
 ```
 
-The `finished` API provides [callback version][stream-finished]:
+The `finished` API also provides a [callback version][stream-finished].
 
 ### Object mode
 
@@ -1904,6 +1904,17 @@ option. In the code example above, data will be in a single chunk if the file
 has less then 64 KiB of data because no `highWaterMark` option is provided to
 [`fs.createReadStream()`][].
 
+##### `readable[Symbol.asyncDispose]()`
+
+<!-- YAML
+added: v20.4.0
+-->
+
+> Stability: 1 - Experimental
+
+Calls [`readable.destroy()`][readable-destroy] with an `AbortError` and returns
+a promise that fulfills when the stream is finished.
+
 ##### `readable.compose(stream[, options])`
 
 <!-- YAML
@@ -2001,6 +2012,10 @@ showBoth();
 added:
   - v17.4.0
   - v16.14.0
+changes:
+  - version: REPLACEME
+    pr-url: https://github.com/nodejs/node/pull/49249
+    description: added `highWaterMark` in options.
 -->
 
 > Stability: 1 - Experimental
@@ -2014,6 +2029,8 @@ added:
 * `options` {Object}
   * `concurrency` {number} the maximum concurrent invocation of `fn` to call
     on the stream at once. **Default:** `1`.
+  * `highWaterMark` {number} how many items to buffer while waiting for user
+    consumption of the mapped items. **Default:** `concurrency * 2 - 1`.
   * `signal` {AbortSignal} allows destroying the stream if the signal is
     aborted.
 * Returns: {Readable} a stream mapped with the function `fn`.
@@ -2048,6 +2065,10 @@ for await (const result of dnsResults) {
 added:
   - v17.4.0
   - v16.14.0
+changes:
+  - version: REPLACEME
+    pr-url: https://github.com/nodejs/node/pull/49249
+    description: added `highWaterMark` in options.
 -->
 
 > Stability: 1 - Experimental
@@ -2060,6 +2081,8 @@ added:
 * `options` {Object}
   * `concurrency` {number} the maximum concurrent invocation of `fn` to call
     on the stream at once. **Default:** `1`.
+  * `highWaterMark` {number} how many items to buffer while waiting for user
+    consumption of the filtered items. **Default:** `concurrency * 2 - 1`.
   * `signal` {AbortSignal} allows destroying the stream if the signal is
     aborted.
 * Returns: {Readable} a stream filtered with the predicate `fn`.
@@ -2447,32 +2470,6 @@ import { Readable } from 'node:stream';
 await Readable.from([1, 2, 3, 4]).take(2).toArray(); // [1, 2]
 ```
 
-##### `readable.asIndexedPairs([options])`
-
-<!-- YAML
-added:
-  - v17.5.0
-  - v16.15.0
--->
-
-> Stability: 1 - Experimental
-
-* `options` {Object}
-  * `signal` {AbortSignal} allows destroying the stream if the signal is
-    aborted.
-* Returns: {Readable} a stream of indexed pairs.
-
-This method returns a new stream with chunks of the underlying stream paired
-with a counter in the form `[index, chunk]`. The first index value is 0 and it
-increases by 1 for each chunk produced.
-
-```mjs
-import { Readable } from 'node:stream';
-
-const pairs = await Readable.from(['a', 'b', 'c']).asIndexedPairs().toArray();
-console.log(pairs); // [[0, 'a'], [1, 'b'], [2, 'c']]
-```
-
 ##### `readable.reduce(fn[, initial[, options]])`
 
 <!-- YAML
@@ -2501,21 +2498,44 @@ This method calls `fn` on each chunk of the stream in order, passing it the
 result from the calculation on the previous element. It returns a promise for
 the final value of the reduction.
 
-The reducer function iterates the stream element-by-element which means that
-there is no `concurrency` parameter or parallelism. To perform a `reduce`
-concurrently, it can be chained to the [`readable.map`][] method.
-
 If no `initial` value is supplied the first chunk of the stream is used as the
 initial value. If the stream is empty, the promise is rejected with a
 `TypeError` with the `ERR_INVALID_ARGS` code property.
 
 ```mjs
 import { Readable } from 'node:stream';
+import { readdir, stat } from 'node:fs/promises';
+import { join } from 'node:path';
 
-const ten = await Readable.from([1, 2, 3, 4]).reduce((previous, data) => {
-  return previous + data;
-});
-console.log(ten); // 10
+const directoryPath = './src';
+const filesInDir = await readdir(directoryPath);
+
+const folderSize = await Readable.from(filesInDir)
+  .reduce(async (totalSize, file) => {
+    const { size } = await stat(join(directoryPath, file));
+    return totalSize + size;
+  }, 0);
+
+console.log(folderSize);
+```
+
+The reducer function iterates the stream element-by-element which means that
+there is no `concurrency` parameter or parallelism. To perform a `reduce`
+concurrently, you can extract the async function to [`readable.map`][] method.
+
+```mjs
+import { Readable } from 'node:stream';
+import { readdir, stat } from 'node:fs/promises';
+import { join } from 'node:path';
+
+const directoryPath = './src';
+const filesInDir = await readdir(directoryPath);
+
+const folderSize = await Readable.from(filesInDir)
+  .map((file) => stat(join(directoryPath, file)), { concurrency: 2 })
+  .reduce((totalSize, { size }) => totalSize + size, 0);
+
+console.log(folderSize);
 ```
 
 ### Duplex and transform streams
@@ -2698,7 +2718,9 @@ const cleanup = finished(rs, (err) => {
 <!-- YAML
 added: v10.0.0
 changes:
-  - version: v19.7.0
+  - version:
+    - v19.7.0
+    - v18.16.0
     pr-url: https://github.com/nodejs/node/pull/46307
     description: Added support for webstreams.
   - version: v18.0.0
@@ -2799,7 +2821,9 @@ const server = http.createServer((req, res) => {
 <!-- YAML
 added: v16.9.0
 changes:
-  - version: REPLACEME
+  - version:
+    - v19.8.0
+    - v18.16.0
     pr-url: https://github.com/nodejs/node/pull/46675
     description: Added support for webstreams.
 -->
@@ -3052,7 +3076,9 @@ added: v17.0.0
 <!-- YAML
 added: v16.8.0
 changes:
-  - version: v19.5.0
+  - version:
+    - v19.5.0
+    - v18.17.0
     pr-url: https://github.com/nodejs/node/pull/46190
     description: The `src` argument can now be a `ReadableStream` or
                  `WritableStream`.
@@ -3240,7 +3266,9 @@ readable.getReader().read().then((result) => {
 <!-- YAML
 added: v15.4.0
 changes:
-  - version: v19.7.0
+  - version:
+    - v19.7.0
+    - v18.16.0
     pr-url: https://github.com/nodejs/node/pull/46273
     description: Added support for `ReadableStream` and
                  `WritableStream`.
@@ -3324,6 +3352,33 @@ reader.read().then(({ value, done }) => {
   controller.abort();
 });
 ```
+
+### `stream.getDefaultHighWaterMark(objectMode)`
+
+<!-- YAML
+added:
+  - v19.9.0
+  - v18.17.0
+-->
+
+* `objectMode` {boolean}
+* Returns: {integer}
+
+Returns the default highWaterMark used by streams.
+Defaults to `16384` (16 KiB), or `16` for `objectMode`.
+
+### `stream.setDefaultHighWaterMark(objectMode, value)`
+
+<!-- YAML
+added:
+  - v19.9.0
+  - v18.17.0
+-->
+
+* `objectMode` {boolean}
+* `value` {integer} highWaterMark value
+
+Sets the default highWaterMark used by streams.
 
 ## API for stream implementers
 
@@ -4480,7 +4535,8 @@ The `callback` function must be called only when the current chunk is completely
 consumed. The first argument passed to the `callback` must be an `Error` object
 if an error occurred while processing the input or `null` otherwise. If a second
 argument is passed to the `callback`, it will be forwarded on to the
-`transform.push()` method. In other words, the following are equivalent:
+`transform.push()` method, but only if the first argument is falsy. In other
+words, the following are equivalent:
 
 ```js
 transform.prototype._transform = function(data, encoding, callback) {

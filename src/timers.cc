@@ -12,9 +12,11 @@ namespace timers {
 using v8::Context;
 using v8::Function;
 using v8::FunctionCallbackInfo;
+using v8::Isolate;
 using v8::Local;
 using v8::Number;
 using v8::Object;
+using v8::ObjectTemplate;
 using v8::Value;
 
 void BindingData::SetupTimers(const FunctionCallbackInfo<Value>& args) {
@@ -92,7 +94,7 @@ bool BindingData::PrepareForSerialization(Local<Context> context,
 }
 
 InternalFieldInfoBase* BindingData::Serialize(int index) {
-  DCHECK_EQ(index, BaseObject::kEmbedderType);
+  DCHECK_IS_SNAPSHOT_SLOT(index);
   InternalFieldInfo* info =
       InternalFieldInfoBase::New<InternalFieldInfo>(type());
   return info;
@@ -102,11 +104,11 @@ void BindingData::Deserialize(Local<Context> context,
                               Local<Object> holder,
                               int index,
                               InternalFieldInfoBase* info) {
-  DCHECK_EQ(index, BaseObject::kEmbedderType);
+  DCHECK_IS_SNAPSHOT_SLOT(index);
   v8::HandleScope scope(context->GetIsolate());
   Realm* realm = Realm::GetCurrent(context);
   // Recreate the buffer in the constructor.
-  BindingData* binding = realm->AddBindingData<BindingData>(context, holder);
+  BindingData* binding = realm->AddBindingData<BindingData>(holder);
   CHECK_NOT_NULL(binding);
 }
 
@@ -119,34 +121,38 @@ v8::CFunction BindingData::fast_toggle_timer_ref_(
 v8::CFunction BindingData::fast_toggle_immediate_ref_(
     v8::CFunction::Make(FastToggleImmediateRef));
 
-void BindingData::Initialize(Local<Object> target,
-                             Local<Value> unused,
-                             Local<Context> context,
-                             void* priv) {
-  Realm* realm = Realm::GetCurrent(context);
-  Environment* env = realm->env();
-  BindingData* const binding_data =
-      realm->AddBindingData<BindingData>(context, target);
-  if (binding_data == nullptr) return;
+void BindingData::CreatePerIsolateProperties(IsolateData* isolate_data,
+                                             Local<ObjectTemplate> target) {
+  Isolate* isolate = isolate_data->isolate();
 
-  SetMethod(context, target, "setupTimers", SetupTimers);
+  SetMethod(isolate, target, "setupTimers", SetupTimers);
   SetFastMethod(
-      context, target, "getLibuvNow", SlowGetLibuvNow, &fast_get_libuv_now_);
-  SetFastMethod(context,
+      isolate, target, "getLibuvNow", SlowGetLibuvNow, &fast_get_libuv_now_);
+  SetFastMethod(isolate,
                 target,
                 "scheduleTimer",
                 SlowScheduleTimer,
                 &fast_schedule_timers_);
-  SetFastMethod(context,
+  SetFastMethod(isolate,
                 target,
                 "toggleTimerRef",
                 SlowToggleTimerRef,
                 &fast_toggle_timer_ref_);
-  SetFastMethod(context,
+  SetFastMethod(isolate,
                 target,
                 "toggleImmediateRef",
                 SlowToggleImmediateRef,
                 &fast_toggle_immediate_ref_);
+}
+
+void BindingData::CreatePerContextProperties(Local<Object> target,
+                                             Local<Value> unused,
+                                             Local<Context> context,
+                                             void* priv) {
+  Realm* realm = Realm::GetCurrent(context);
+  Environment* env = realm->env();
+  BindingData* const binding_data = realm->AddBindingData<BindingData>(target);
+  if (binding_data == nullptr) return;
 
   // TODO(joyeecheung): move these into BindingData.
   target
@@ -187,7 +193,9 @@ void BindingData::RegisterTimerExternalReferences(
 
 }  // namespace node
 
-NODE_BINDING_CONTEXT_AWARE_INTERNAL(timers,
-                                    node::timers::BindingData::Initialize)
+NODE_BINDING_CONTEXT_AWARE_INTERNAL(
+    timers, node::timers::BindingData::CreatePerContextProperties)
+NODE_BINDING_PER_ISOLATE_INIT(
+    timers, node::timers::BindingData::CreatePerIsolateProperties)
 NODE_BINDING_EXTERNAL_REFERENCE(
     timers, node::timers::BindingData::RegisterTimerExternalReferences)

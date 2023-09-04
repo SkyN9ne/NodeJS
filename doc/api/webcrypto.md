@@ -2,9 +2,11 @@
 
 <!-- YAML
 changes:
-  - version: REPLACEME
+  - version:
+    - v20.0.0
+    - v18.17.0
     pr-url: https://github.com/nodejs/node/pull/46067
-    description: Arguments are now coersed and validated as per their WebIDL
+    description: Arguments are now coerced and validated as per their WebIDL
       definitions like in other Web Crypto API implementations.
   - version: v19.0.0
     pr-url: https://github.com/nodejs/node/pull/44897
@@ -1639,7 +1641,7 @@ added: v15.0.0
 The length (in bytes) of the random salt to use.
 
 [^1]: An experimental implementation of
-    [Secure Curves in the Web Cryptography API][] as of 05 May 2022
+    [Secure Curves in the Web Cryptography API][] as of 30 August 2023
 
 [JSON Web Key]: https://tools.ietf.org/html/rfc7517
 [Key usages]: #cryptokeyusages

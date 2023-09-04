@@ -194,7 +194,8 @@ Disable top-level await keyword support in REPL.
 Enable experimental ES module support in VM module.
 .
 .It Fl -experimental-wasi-unstable-preview1
-Enable experimental WebAssembly System Interface support.
+Enable experimental WebAssembly System Interface support. This
+flag is no longer required as WASI is enabled by default.
 .
 .It Fl -experimental-wasm-modules
 Enable experimental WebAssembly module support.
@@ -422,6 +423,9 @@ The destination for the corresponding test reporter.
 .It Fl -test-only
 Configures the test runner to only execute top level tests that have the `only`
 option set.
+.
+.It Fl -test-shard
+Test suite shard to execute in a format of <index>/<total>.
 .
 .It Fl -throw-deprecation
 Throw errors for deprecations.
